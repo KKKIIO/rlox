@@ -199,8 +199,6 @@ fn string<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
     return Ok((input, s.unwrap_or("".to_string())));
 }
 
-type Number = f64;
-
 // unary          → ( "-" | "!" ) expression ;
 #[derive(Debug, PartialEq)]
 pub enum Unary<'a> {

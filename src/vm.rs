@@ -16,6 +16,7 @@ pub struct VM {
 }
 
 static ARITHMETIC_OPERANDS_ERR_MSG: &'static str = "Operands must be numbers.";
+static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two strings.";
 
 impl VM {
     pub fn new() -> VM {
@@ -35,51 +36,73 @@ impl VM {
             self.ip += 1;
             let op_code = &chunk.codes[ip];
 
-            if cfg!(debug_assertions) {
-                let line = if ip > 0 && chunk.lines[ip] == chunk.lines[ip - 1] {
-                    "   |".to_string()
-                } else {
-                    format!("{:4}", chunk.lines[ip])
-                };
-                println!("{:04}.\t{} {:?}", ip, line, op_code);
-            }
+            // if cfg!(debug_assertions) {
+            //     let line = if ip > 0 && chunk.lines[ip] == chunk.lines[ip - 1] {
+            //         "   |".to_string()
+            //     } else {
+            //         format!("{:4}", chunk.lines[ip])
+            //     };
+            //     println!("{:04}.\t{} {:?}", ip, line, op_code);
+            // }
 
             match op_code {
-                OpCode::LoadConst(i) => {
-                    let v = chunk.constant_pool[usize::from(*i)].clone();
-                    self.stack.push(v);
+                &OpCode::LoadNumber(n) => self.stack.push(Value::Number(n)),
+                &OpCode::LoadConstStr(i) => {
+                    let s = &chunk.const_str_pool[usize::from(i)];
+                    self.stack.push(Value::String(s.clone()));
                 }
-                OpCode::LoadConstLong(i) => {
-                    let v = chunk.constant_pool[usize::try_from(*i).unwrap()].clone();
-                    self.stack.push(v);
+                &OpCode::LoadConstStrLong(i) => {
+                    let s = &chunk.const_str_pool[usize::try_from(i).unwrap()];
+                    self.stack.push(Value::String(s.clone()));
                 }
                 OpCode::Add => {
-                    let (a, b) = Self::try_pop2num(&mut self.stack)?;
-                    self.stack.push(Value::Num(a + b));
+                    let b_idx = self.stack.len() - 1;
+                    let a_idx = b_idx - 1;
+                    match (&self.stack[b_idx], &self.stack[a_idx]) {
+                        (Value::Number(_), Value::Number(_)) => (),
+                        (Value::String(_), Value::String(_)) => (),
+                        _ => return Err(ADD_OPERANDS_ERR_MSG.into()),
+                    }
+                    let b = self.stack.pop().unwrap();
+                    let a = self.stack.pop().unwrap();
+                    match a {
+                        Value::String(mut str_a) => match b {
+                            Value::String(str_b) => {
+                                str_a.push_str(&str_b);
+                                self.stack.push(Value::String(str_a));
+                            }
+                            _ => panic!("never happen"),
+                        },
+                        Value::Number(a) => match b {
+                            Value::Number(b) => self.stack.push(Value::Number(a + b)),
+                            _ => panic!("never happen"),
+                        },
+                        _ => panic!("never happen"),
+                    }
                 }
                 OpCode::Subtract => {
                     let (a, b) = Self::try_pop2num(&mut self.stack)?;
-                    self.stack.push(Value::Num(a - b));
+                    self.stack.push(Value::Number(a - b));
                 }
                 OpCode::Multiply => {
                     let (a, b) = Self::try_pop2num(&mut self.stack)?;
-                    self.stack.push(Value::Num(a * b));
+                    self.stack.push(Value::Number(a * b));
                 }
                 OpCode::Divide => {
                     let (a, b) = Self::try_pop2num(&mut self.stack)?;
-                    self.stack.push(Value::Num(a / b));
+                    self.stack.push(Value::Number(a / b));
                 }
                 OpCode::Negate => {
                     let v = self.stack.last_mut().unwrap();
                     match v {
-                        Value::Num(n) => *n = -*n,
+                        Value::Number(n) => *n = -*n,
                         _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
                     }
                 }
-                OpCode::Return => {
-                    println!("{}", self.stack.pop().unwrap());
-                    break;
-                }
+                // OpCode::Return => {
+                //     println!("{}", self.stack.pop().unwrap());
+                //     break;
+                // }
                 OpCode::Print => println!("{}", self.stack.pop().unwrap()),
                 OpCode::LoadNil => self.stack.push(Value::Nil),
                 OpCode::LoadTrue => self.stack.push(Value::Bool(true)),
@@ -104,11 +127,11 @@ impl VM {
         let bi = len - 1;
         let ai = bi - 1;
         let b = match stack[bi] {
-            Value::Num(n) => n,
+            Value::Number(n) => n,
             _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
         };
         let a = match stack[ai] {
-            Value::Num(n) => n,
+            Value::Number(n) => n,
             _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
         };
         stack.pop();

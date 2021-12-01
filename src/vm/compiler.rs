@@ -11,11 +11,12 @@ use std::convert::TryFrom;
 
 #[derive(Debug, PartialEq)]
 pub enum OpCode {
-    LoadConst(u8),
-    LoadConstLong(u32),
     LoadNil,
-    LoadTrue,
     LoadFalse,
+    LoadTrue,
+    LoadNumber(f64),
+    LoadConstStr(u8),
+    LoadConstStrLong(u32),
     Equal,
     Less,
     Greater,
@@ -26,15 +27,15 @@ pub enum OpCode {
     Not,
     Negate,
     Print,
-    Return,
+    // Return,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     Nil,
     Bool(bool),
-    Num(f64),
-    // Str(String),
+    Number(f64),
+    String(String),
 }
 
 impl Display for Value {
@@ -42,7 +43,8 @@ impl Display for Value {
         match self {
             Value::Nil => write!(f, "nil"),
             Value::Bool(b) => write!(f, "{}", b),
-            Value::Num(n) => write!(f, "{}", GPoint(*n)),
+            Value::Number(n) => write!(f, "{}", GPoint(*n)),
+            Value::String(s) => write!(f, "{}", s),
         }
     }
 }
@@ -50,7 +52,7 @@ impl Display for Value {
 pub struct Chunk {
     pub codes: Vec<OpCode>,
     pub lines: Vec<u32>,
-    pub constant_pool: Vec<Value>,
+    pub const_str_pool: Vec<String>,
 }
 
 impl Chunk {
@@ -58,7 +60,7 @@ impl Chunk {
         return Chunk {
             codes: vec![],
             lines: vec![],
-            constant_pool: vec![],
+            const_str_pool: vec![],
         };
     }
 
@@ -68,14 +70,14 @@ impl Chunk {
         self.lines.push(line);
     }
 
-    pub fn add_const(&mut self, value: Value, line: u32) {
-        let idx = self.constant_pool.len();
+    pub fn add_const_str(&mut self, str: String, line: u32) {
+        let idx = self.const_str_pool.len();
         let code = if let Ok(i) = u8::try_from(idx) {
-            OpCode::LoadConst(i)
+            OpCode::LoadConstStr(i)
         } else {
-            OpCode::LoadConstLong(u32::try_from(idx).unwrap())
+            OpCode::LoadConstStrLong(u32::try_from(idx).unwrap())
         };
-        self.constant_pool.push(value);
+        self.const_str_pool.push(str);
         self.add_code(code, line);
     }
 
@@ -128,8 +130,10 @@ impl Compiler {
     ) -> Result<(), Box<dyn Error>> {
         match &expr.branch {
             ExprBranch::Literal(l) => match l {
-                Literal::Number(n) => chunk.add_const(Value::Num(*n), expr.pos.location_line()),
-                Literal::String(_) => todo!(),
+                Literal::Number(n) => {
+                    chunk.add_code(OpCode::LoadNumber(*n), expr.pos.location_line())
+                }
+                Literal::String(s) => chunk.add_const_str(s.clone(), expr.pos.location_line()),
                 Literal::True => chunk.add_code(OpCode::LoadTrue, expr.pos.location_line()),
                 Literal::False => chunk.add_code(OpCode::LoadFalse, expr.pos.location_line()),
                 Literal::Nil => chunk.add_code(OpCode::LoadNil, expr.pos.location_line()),

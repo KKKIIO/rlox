@@ -1,3 +1,4 @@
+use nom::character::complete::char;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -6,7 +7,6 @@ use nom::{
     sequence::{terminated, tuple},
     IResult,
 };
-use nom::{character::complete::char, error::context};
 
 use nom_locate::position;
 
