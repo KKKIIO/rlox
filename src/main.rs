@@ -23,8 +23,18 @@ fn main() {
         let mut f = File::open(fp).unwrap();
         let mut buf = String::new();
         f.read_to_string(&mut buf).unwrap();
-        let program = parse_source(buf.as_str().into()).unwrap();
-        vm.run(&program).unwrap();
+        match parse_source(buf.as_str().into()) {
+            Ok(program) => {
+                if let Err(err) = vm.run(&program) {
+                    eprintln!("{}\n[line {}]", err.message, err.line);
+                    exit(70);
+                }
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                exit(65);
+            }
+        }
     } else {
         let mut line = String::new();
         loop {
@@ -42,11 +52,11 @@ fn main() {
             match parse_source(line.into()) {
                 Ok(program) => {
                     if let Err(err) = vm.run(&program) {
-                        println!("vm.run error: {}", err);
+                        println!("{}\n[line {}]", err.message, err.line);
                     }
                 }
                 Err(e) => {
-                    println!("parse error: {}", e);
+                    println!("{}", e);
                 }
             }
         }

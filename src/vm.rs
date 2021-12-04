@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use crate::{ast::program::Program, vm::compiler::OpCode};
 
 use self::compiler::{Chunk, Compiler, Value};
@@ -14,6 +12,10 @@ pub struct VM {
     ip: usize,
     stack: Vec<Value>,
 }
+pub struct RuntimeError {
+    pub message: String,
+    pub line: u32,
+}
 
 static ARITHMETIC_OPERANDS_ERR_MSG: &'static str = "Operands must be numbers.";
 static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two strings.";
@@ -27,8 +29,8 @@ impl VM {
             stack: vec![],
         }
     }
-    pub fn run(&mut self, program: &Program) -> Result<(), Box<dyn Error>> {
-        self.chunk = Some(self.compiler.compile_program(program)?);
+    pub fn run(&mut self, program: &Program) -> Result<(), RuntimeError> {
+        self.chunk = Some(self.compiler.compile_program(program));
         let chunk = self.chunk.as_ref().unwrap();
         self.ip = 0;
         while self.ip < chunk.codes.len() {
@@ -61,7 +63,12 @@ impl VM {
                     match (&self.stack[b_idx], &self.stack[a_idx]) {
                         (Value::Number(_), Value::Number(_)) => (),
                         (Value::String(_), Value::String(_)) => (),
-                        _ => return Err(ADD_OPERANDS_ERR_MSG.into()),
+                        _ => {
+                            return Err(RuntimeError {
+                                message: ADD_OPERANDS_ERR_MSG.to_string(),
+                                line: chunk.get_line(ip),
+                            });
+                        }
                     }
                     let b = self.stack.pop().unwrap();
                     let a = self.stack.pop().unwrap();
@@ -71,32 +78,37 @@ impl VM {
                                 str_a.push_str(&str_b);
                                 self.stack.push(Value::String(str_a));
                             }
-                            _ => panic!("never happen"),
+                            _ => unreachable!(),
                         },
                         Value::Number(a) => match b {
                             Value::Number(b) => self.stack.push(Value::Number(a + b)),
-                            _ => panic!("never happen"),
+                            _ => unreachable!(),
                         },
-                        _ => panic!("never happen"),
+                        _ => unreachable!(),
                     }
                 }
                 OpCode::Subtract => {
-                    let (a, b) = Self::try_pop2num(&mut self.stack)?;
+                    let (a, b) = Self::try_pop2num(&mut self.stack, chunk.get_line(ip))?;
                     self.stack.push(Value::Number(a - b));
                 }
                 OpCode::Multiply => {
-                    let (a, b) = Self::try_pop2num(&mut self.stack)?;
+                    let (a, b) = Self::try_pop2num(&mut self.stack, chunk.get_line(ip))?;
                     self.stack.push(Value::Number(a * b));
                 }
                 OpCode::Divide => {
-                    let (a, b) = Self::try_pop2num(&mut self.stack)?;
+                    let (a, b) = Self::try_pop2num(&mut self.stack, chunk.get_line(ip))?;
                     self.stack.push(Value::Number(a / b));
                 }
                 OpCode::Negate => {
                     let v = self.stack.last_mut().unwrap();
                     match v {
                         Value::Number(n) => *n = -*n,
-                        _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
+                        _ => {
+                            return Err(RuntimeError {
+                                message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
+                                line: chunk.get_line(ip),
+                            })
+                        }
                     }
                 }
                 // OpCode::Return => {
@@ -112,8 +124,14 @@ impl VM {
                     let a = self.stack.pop().unwrap();
                     self.stack.push(Value::Bool(a == b));
                 }
-                OpCode::Less => todo!(),
-                OpCode::Greater => todo!(),
+                OpCode::Less => {
+                    let (a, b) = Self::try_pop2num(&mut self.stack, chunk.get_line(ip))?;
+                    self.stack.push(Value::Bool(a < b));
+                }
+                OpCode::Greater => {
+                    let (a, b) = Self::try_pop2num(&mut self.stack, chunk.get_line(ip))?;
+                    self.stack.push(Value::Bool(a > b));
+                }
                 OpCode::Not => {
                     let v = self.stack.pop().unwrap();
                     self.stack.push(Value::Bool(Self::is_falsey(&v)));
@@ -122,17 +140,27 @@ impl VM {
         }
         Ok(())
     }
-    fn try_pop2num(stack: &mut Vec<Value>) -> Result<(f64, f64), Box<dyn Error>> {
+    fn try_pop2num(stack: &mut Vec<Value>, line: u32) -> Result<(f64, f64), RuntimeError> {
         let len = stack.len();
         let bi = len - 1;
         let ai = bi - 1;
         let b = match stack[bi] {
             Value::Number(n) => n,
-            _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
+            _ => {
+                return Err(RuntimeError {
+                    message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
+                    line,
+                })
+            }
         };
         let a = match stack[ai] {
             Value::Number(n) => n,
-            _ => return Err(ARITHMETIC_OPERANDS_ERR_MSG.into()),
+            _ => {
+                return Err(RuntimeError {
+                    message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
+                    line,
+                })
+            }
         };
         stack.pop();
         stack.pop();

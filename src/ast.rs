@@ -1,11 +1,8 @@
-use nom::{
-    error::{Error},
-    Finish,
-};
+use nom::Finish;
 
 use self::{
-    parse::Span,
-    program::{parse_program, Program},
+    parse::{GrammarError, Span},
+    program::{program, Program},
 };
 
 pub mod comment;
@@ -14,8 +11,8 @@ pub mod parse;
 pub mod program;
 pub mod statement;
 
-pub fn parse_source(input: Span) -> Result<Program, Error<Span>> {
-    parse_program(input.into())
+pub fn parse_source(input: Span) -> Result<Program, GrammarError<Span>> {
+    program(input.into())
         .finish()
         .map(|(_, program)| program)
 }

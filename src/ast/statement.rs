@@ -3,7 +3,7 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     combinator::{cut, map},
-    error::{ContextError, ParseError},
+    error::ParseError,
     sequence::{terminated, tuple},
     IResult,
 };
@@ -15,7 +15,7 @@ use crate::ast::expression::Literal;
 use super::{
     comment::comment_whitespace0,
     expression::{expression, ExprBranch, Expression},
-    parse::Span,
+    parse::{GrammarError, Span},
 };
 
 #[derive(Debug, PartialEq)]
@@ -31,36 +31,26 @@ pub enum StmtBranch<'a> {
 }
 
 // statement      → exprStmt | printStmt ;
-pub fn statement<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Statement, E> {
+pub fn statement(input: Span) -> IResult<Span, Statement, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, branch) = alt((
-        map(expr_statement, |expression| {
-            StmtBranch::Expression(expression)
-        }),
-        map(print_statement, |print_statement| {
-            StmtBranch::Print(print_statement)
-        }),
+        map(print_statement, |expr| StmtBranch::Print(expr)),
+        map(expr_statement, |expr| StmtBranch::Expression(expr)),
     ))(input)?;
     Ok((input, Statement { pos, branch }))
 }
 
 // exprStmt       → expression ";" ;
-fn expr_statement<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn expr_statement(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     terminated(expression, tuple((char(';'), comment_whitespace0)))(input)
 }
 
 // printStmt      → "print" expression ";" ;
-fn print_statement<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn print_statement(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, _) = tag("print")(input)?;
     let (input, ws) = comment_whitespace0(input)?;
     if ws.is_empty() {
-        return Err(nom::Err::Error(E::from_error_kind(
+        return Err(nom::Err::Error(GrammarError::from_error_kind(
             input,
             nom::error::ErrorKind::MultiSpace,
         )));
@@ -75,23 +65,20 @@ fn print_statement<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
 mod test {
     use std::error::Error;
 
-    use nom::error::ErrorKind;
+    use crate::ast::parse::GrammarErrorKind;
 
     use super::*;
     #[test]
     fn test_print_statement() {
-        let (_, res) = print_statement::<nom::error::Error<Span>>(
-            "print \"Hello, world!\"; // Hello, world!".into(),
-        )
-        .unwrap();
+        let (_, res) = print_statement("print \"Hello, world!\"; // Hello, world!".into()).unwrap();
         let expected = ExprBranch::Literal(Literal::String("Hello, world!".to_string()));
         assert_eq!(res.branch, expected);
-        print_statement::<nom::error::Error<Span>>("print1".into()).unwrap_err();
+        print_statement("print1".into()).unwrap_err();
     }
 
     #[test]
     fn test_expr_statement() -> Result<(), Box<dyn Error>> {
-        let (_, res) = expr_statement::<(Span, ErrorKind)>("1;".into())?;
+        let (_, res) = expr_statement("1;".into())?;
         assert_eq!(res.branch, ExprBranch::Literal(Literal::Number(1.0)));
         Ok(())
     }

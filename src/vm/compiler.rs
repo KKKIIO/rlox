@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Display};
+use std::fmt::Display;
 
 use gpoint::GPoint;
 
@@ -51,7 +51,7 @@ impl Display for Value {
 
 pub struct Chunk {
     pub codes: Vec<OpCode>,
-    pub lines: Vec<u32>,
+    lines: Vec<u32>,
     pub const_str_pool: Vec<String>,
 }
 
@@ -81,6 +81,10 @@ impl Chunk {
         self.add_code(code, line);
     }
 
+    pub fn get_line(&self, ip: usize) -> u32 {
+        self.lines[ip]
+    }
+
     pub fn print_chunk(&self, name: &str) {
         println!("== {} ==", name);
         for (i, code) in self.codes.iter().enumerate() {
@@ -99,35 +103,26 @@ impl Compiler {
     pub fn new() -> Compiler {
         return Compiler {};
     }
-    pub fn compile_program(&self, program: &Program) -> Result<Chunk, Box<dyn std::error::Error>> {
+    pub fn compile_program(&self, program: &Program) -> Chunk {
         let mut chunk = Chunk::new();
         for stmt in program.statements.iter() {
-            self.compile_statement(&mut chunk, &stmt)?;
+            self.compile_statement(&mut chunk, &stmt);
         }
-        Ok(chunk)
+        chunk
     }
 
-    pub fn compile_statement<'a>(
-        &self,
-        chunk: &mut Chunk,
-        stmt: &Statement<'a>,
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn compile_statement<'a>(&self, chunk: &mut Chunk, stmt: &Statement<'a>) {
         match &stmt.branch {
             StmtBranch::Expression(expr) => {
-                self.compile_expression(chunk, expr)?;
+                self.compile_expression(chunk, expr);
             }
             StmtBranch::Print(expr) => {
-                self.compile_expression(chunk, &expr)?;
+                self.compile_expression(chunk, &expr);
                 chunk.add_code(OpCode::Print, stmt.pos.location_line());
             }
         }
-        Ok(())
     }
-    fn compile_expression<'a>(
-        &self,
-        chunk: &mut Chunk,
-        expr: &Expression<'a>,
-    ) -> Result<(), Box<dyn Error>> {
+    fn compile_expression<'a>(&self, chunk: &mut Chunk, expr: &Expression<'a>) {
         match &expr.branch {
             ExprBranch::Literal(l) => match l {
                 Literal::Number(n) => {
@@ -143,12 +138,12 @@ impl Compiler {
                     Unary::Negative(n) => (OpCode::Negate, n),
                     Unary::Not(n) => (OpCode::Not, n),
                 };
-                self.compile_expression(chunk, u_expr)?;
+                self.compile_expression(chunk, u_expr);
                 chunk.add_code(op_code, expr.pos.location_line());
             }
             ExprBranch::Binary(b) => {
-                self.compile_expression(chunk, &b.left)?;
-                self.compile_expression(chunk, &b.right)?;
+                self.compile_expression(chunk, &b.left);
+                self.compile_expression(chunk, &b.right);
                 let line = expr.pos.location_line();
                 match b.op {
                     Operator::Equal => chunk.add_code(OpCode::Equal, line),
@@ -172,9 +167,8 @@ impl Compiler {
                     Operator::Divide => chunk.add_code(OpCode::Divide, line),
                 };
             }
-            ExprBranch::Grouping(g) => self.compile_expression(chunk, &g)?,
+            ExprBranch::Grouping(g) => self.compile_expression(chunk, &g),
         }
-        Ok(())
     }
 }
 
@@ -185,11 +179,10 @@ mod test {
 
     use super::*;
     #[test]
-    fn test_compile_program() -> Result<(), Box<dyn Error>> {
-        let program = parse_source("print 1;".into())?;
+    fn test_compile_program() {
+        let program = parse_source("print 1;".into()).unwrap();
         let compiler = Compiler {};
-        let chunk = compiler.compile_program(&program)?;
+        let chunk = compiler.compile_program(&program);
         chunk.print_chunk("test");
-        Ok(())
     }
 }

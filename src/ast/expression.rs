@@ -1,10 +1,10 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    combinator::{cut, map, opt, value},
-    error::{context, ContextError, ParseError},
-    number::complete::double,
-    sequence::terminated,
+    character::complete::digit1,
+    combinator::{cut, map, opt, recognize, value},
+    error::context,
+    sequence::{terminated, tuple},
     IResult,
 };
 use nom::{
@@ -14,7 +14,10 @@ use nom::{
 };
 use nom_locate::position;
 
-use super::{comment::comment_whitespace0, parse::Span};
+use super::{
+    comment::comment_whitespace0,
+    parse::{GrammarError, GrammarErrorKind, Span},
+};
 
 #[derive(Debug, PartialEq)]
 pub struct Expression<'a> {
@@ -39,9 +42,7 @@ pub enum ExprBranch<'a> {
 /// Term|	- +	|Left
 /// Factor|	/ *	|Left
 /// Unary|	! -	|Right
-pub fn expression<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+pub fn expression(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     include_equality(input)
 }
 
@@ -52,9 +53,7 @@ pub struct Binary<'a> {
     pub right: Box<Expression<'a>>,
 }
 
-fn include_equality<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn include_equality(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_comparison(input)?;
     let (input, op) = opt(alt((
@@ -75,9 +74,7 @@ fn include_equality<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
     }
 }
 
-fn include_comparison<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn include_comparison(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_term(input)?;
     let (input, op) = opt(alt((
@@ -100,9 +97,7 @@ fn include_comparison<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
     }
 }
 
-fn include_term<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn include_term(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_factor(input)?;
     let (input, op) = opt(alt((
@@ -122,9 +117,7 @@ fn include_term<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
         Ok((input, left))
     }
 }
-fn include_factor<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn include_factor(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_unary(input)?;
     let (input, op) = opt(alt((
@@ -145,9 +138,7 @@ fn include_factor<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
     }
 }
 
-fn include_unary<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Expression, E> {
+fn include_unary(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, branch) = alt((
         map(unary, |u| ExprBranch::Unary(u)),
@@ -167,12 +158,10 @@ pub enum Literal {
     Nil,
 }
 
-fn literal<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Literal, E> {
+fn literal(input: Span) -> IResult<Span, Literal, GrammarError<Span>> {
     terminated(
         alt((
-            map(double, |n| -> Literal { Literal::Number(n) }),
+            map(number, |n| -> Literal { Literal::Number(n) }),
             map(string, |s| -> Literal { Literal::String(s) }),
             map(tag("true"), |_| -> Literal { Literal::True }),
             map(tag("false"), |_| -> Literal { Literal::False }),
@@ -182,9 +171,14 @@ fn literal<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
     )(input)
 }
 
-fn string<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, String, E> {
+fn number(input: Span) -> IResult<Span, f64, GrammarError<Span>> {
+    map(
+        recognize(tuple((digit1, opt(tuple((char('.'), digit1)))))),
+        |s: Span| s.fragment().parse::<f64>().unwrap(),
+    )(input)
+}
+
+fn string(input: Span) -> IResult<Span, String, GrammarError<Span>> {
     let (input, _) = char('"')(input)?;
     let (input, s) = opt(escaped_transform(
         is_not("\\\"\n"),
@@ -195,7 +189,16 @@ fn string<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
             value("\n", tag("n")),
         )),
     ))(input)?;
-    let (input, _) = char('"')(input)?;
+    let (input, _) = char::<Span, nom::error::Error<Span>>('"')(input).map_err(|e| {
+        nom::Err::Failure(GrammarError {
+            input: match e {
+                nom::Err::Error(e) => e.input,
+                nom::Err::Failure(e) => e.input,
+                nom::Err::Incomplete(_) => unreachable!(),
+            },
+            error_kind: GrammarErrorKind::Grammar("Unterminated string."),
+        })
+    })?;
     return Ok((input, s.unwrap_or("".to_string())));
 }
 
@@ -206,9 +209,7 @@ pub enum Unary<'a> {
     Not(Box<Expression<'a>>),
 }
 
-fn unary<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Unary, E> {
+fn unary(input: Span) -> IResult<Span, Unary, GrammarError<Span>> {
     context(
         "unary",
         alt((
@@ -223,9 +224,7 @@ fn unary<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
 }
 
 // grouping       → "(" expression ")" ;
-fn grouping<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
-    input: Span<'a>,
-) -> IResult<Span, Box<Expression>, E> {
+fn grouping(input: Span) -> IResult<Span, Box<Expression>, GrammarError<Span>> {
     let (input, _) = char('(')(input)?;
     let (input, _) = comment_whitespace0(input)?;
     let (input, e) = context("group expression", cut(expression))(input)?;
@@ -253,38 +252,43 @@ pub enum Operator {
 mod test {
     use std::error::Error;
 
-    use nom::error::ErrorKind;
-
     use super::*;
     #[test]
-    fn test_string() -> Result<(), Box<dyn Error>> {
-        let (_, res) = string::<(Span, ErrorKind)>("\"hello\"".into())?;
-        assert_eq!(res, "hello".to_string());
-        let (_, res) = string::<(Span, ErrorKind)>(r#""""#.into())?;
-        assert_eq!(res, "".to_string());
-        let (_, res) = string::<(Span, ErrorKind)>("\"\"\"".into())?;
-        assert_eq!(res, "".to_string());
-        Ok(())
+    fn test_string() {
+        let (_, res) = string("\"hello\"".into()).unwrap();
+        assert_eq!(res, "hello");
+        let (_, res) = string("\"\"".into()).unwrap();
+        assert_eq!(res, "");
+        let (_, res) = string("\"\\\\\"".into()).unwrap();
+        assert_eq!(res, "\\");
+        let err = match string("\"this string has no close quote".into()).unwrap_err() {
+            nom::Err::Failure(e) => e,
+            _ => panic!("Expected failure"),
+        };
+        assert_eq!(
+            err.error_kind,
+            GrammarErrorKind::Grammar("Unterminated string."),
+        );
     }
 
     #[test]
     fn test_literal() -> Result<(), Box<dyn Error>> {
-        let (_, res) = literal::<(Span, ErrorKind)>("1".into())?;
+        let (_, res) = literal("1".into())?;
         assert_eq!(res, Literal::Number(1.0));
-        let (_, res) = literal::<(Span, ErrorKind)>("\"hello\"".into())?;
+        let (_, res) = literal("\"hello\"".into())?;
         assert_eq!(res, Literal::String("hello".to_string()));
-        let (_, res) = literal::<(Span, ErrorKind)>("true".into())?;
+        let (_, res) = literal("true".into())?;
         assert_eq!(res, Literal::True);
-        let (_, res) = literal::<(Span, ErrorKind)>("false".into())?;
+        let (_, res) = literal("false".into())?;
         assert_eq!(res, Literal::False);
-        let (_, res) = literal::<(Span, ErrorKind)>("nil".into())?;
+        let (_, res) = literal("nil".into())?;
         assert_eq!(res, Literal::Nil);
         Ok(())
     }
 
     #[test]
     fn test_grouping() -> Result<(), Box<dyn Error>> {
-        let (_, res) = grouping::<(Span, ErrorKind)>("(1 + 2)".into())?;
+        let (_, res) = grouping("(1 + 2)".into())?;
         if let ExprBranch::Binary(bin) = res.branch {
             assert_eq!(bin.left.branch, ExprBranch::Literal(Literal::Number(1.0)));
             assert_eq!(bin.right.branch, ExprBranch::Literal(Literal::Number(2.0)));
@@ -296,8 +300,9 @@ mod test {
     }
 
     #[test]
-    fn test_expression() {
-        // let (_, res) = expression("(5 - (3 - 1)) + -1 ".into())?;
+    fn test_pos() {
+        let (_, res) = expression("1-2".into()).unwrap();
+        assert_eq!(res.pos.location_line(), 1);
         // let bin = match res.branch {
         //     ExprBranch::Binary(bin) => bin,
         //     _ => panic!("not binary"),
