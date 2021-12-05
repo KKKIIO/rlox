@@ -1,5 +1,4 @@
 use nom::{
-    character::complete::multispace0,
     combinator::{eof, map},
     multi::many_till,
     IResult,
@@ -8,7 +7,7 @@ use nom::{
 use super::{
     comment::comment_whitespace0,
     parse::{GrammarError, Span},
-    statement::{statement, Statement},
+    statement::{decl_or_stmt, DeclOrStmt},
 };
 
 /*
@@ -16,7 +15,7 @@ program        → statement* EOF ;
  */
 #[derive(Debug, PartialEq)]
 pub struct Program<'a> {
-    pub statements: Vec<Statement<'a>>,
+    pub statements: Vec<DeclOrStmt<'a>>,
 }
 
 pub fn program(input: Span) -> IResult<Span, Program, GrammarError<Span>> {
@@ -24,13 +23,14 @@ pub fn program(input: Span) -> IResult<Span, Program, GrammarError<Span>> {
     if input.is_empty() {
         return Ok((input, Program { statements: vec![] }));
     }
-    let (input, program) = map(many_till(statement, eof), |(statements, _)| Program {
+    let (input, program) = map(many_till(decl_or_stmt, eof), |(statements, _)| Program {
         statements,
     })(input)?;
     Ok((input, program))
 }
 
-mod tests {
+#[cfg(test)]
+mod test {
     use super::*;
     use crate::ast::parse::GrammarErrorKind;
 

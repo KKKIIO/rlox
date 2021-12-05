@@ -5,12 +5,12 @@ use std::{
     process::exit,
 };
 
-use vm::VM;
+use hand_make_vm::HandMakeVM;
 
 use crate::ast::parse_source;
 
 mod ast;
-mod vm;
+mod hand_make_vm;
 fn main() {
     let args = args().skip(1).collect::<Vec<_>>();
     if args.len() > 1 {
@@ -18,7 +18,7 @@ fn main() {
         exit(64);
     }
     let filepath = args.get(0);
-    let mut vm = VM::new();
+    let mut vm = HandMakeVM::new();
     if let Some(fp) = filepath {
         let mut f = File::open(fp).unwrap();
         let mut buf = String::new();

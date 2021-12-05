@@ -1,9 +1,48 @@
 use std::fmt::Display;
 
-use nom::error::{ContextError, ParseError};
-use nom_locate::LocatedSpan;
+use nom::{
+    error::{ContextError, ParseError},
+    IResult, Parser,
+};
+use nom_locate::{position, LocatedSpan};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
+
+#[derive(Debug, PartialEq)]
+pub struct LocatedAst<T> {
+    pub ast: T,
+    line: u32,
+}
+
+impl<T> LocatedAst<T> {
+    pub fn new(pos: Span, token: T) -> Self {
+        Self {
+            ast: token,
+            line: pos.location_line(),
+        }
+    }
+    pub fn get_line(&self) -> u32 {
+        self.line
+    }
+    pub fn include_pos<'a, F>(
+        mut parser: F,
+    ) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>
+    where
+        F: Parser<Span<'a>, T, GrammarError<Span<'a>>>,
+    {
+        move |input: Span| {
+            let (input, pos) = position(input)?;
+            let (input, ast) = parser.parse(input)?;
+            Ok((
+                input,
+                Self {
+                    ast,
+                    line: pos.location_line(),
+                },
+            ))
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct GrammarError<I> {

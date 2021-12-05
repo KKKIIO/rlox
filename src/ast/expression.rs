@@ -16,21 +16,17 @@ use nom_locate::position;
 
 use super::{
     comment::comment_whitespace0,
-    parse::{GrammarError, GrammarErrorKind, Span},
+    identifier::identifier,
+    parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
 };
 
 #[derive(Debug, PartialEq)]
-pub struct Expression<'a> {
-    pub pos: Span<'a>,
-    pub branch: ExprBranch<'a>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ExprBranch<'a> {
+pub enum Expression<'a> {
     Literal(Literal),
     Unary(Unary<'a>),
     Binary(Binary<'a>),
-    Grouping(Box<Expression<'a>>),
+    Grouping(Box<LocatedAst<Expression<'a>>>),
+    Variable(&'a str),
 }
 
 /// going from lowest to highest.
@@ -42,18 +38,18 @@ pub enum ExprBranch<'a> {
 /// Term|	- +	|Left
 /// Factor|	/ *	|Left
 /// Unary|	! -	|Right
-pub fn expression(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     include_equality(input)
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Binary<'a> {
-    pub left: Box<Expression<'a>>,
+    pub left: Box<LocatedAst<Expression<'a>>>,
     pub op: Operator,
-    pub right: Box<Expression<'a>>,
+    pub right: Box<LocatedAst<Expression<'a>>>,
 }
 
-fn include_equality(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+fn include_equality(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_comparison(input)?;
     let (input, op) = opt(alt((
@@ -63,18 +59,18 @@ fn include_equality(input: Span) -> IResult<Span, Expression, GrammarError<Span>
     if let Some(op) = op {
         let (input, _) = comment_whitespace0(input)?;
         let (input, right) = cut(include_equality)(input)?;
-        let branch = ExprBranch::Binary(Binary {
+        let expr = Expression::Binary(Binary {
             left: Box::new(left),
             op,
             right: Box::new(right),
         });
-        Ok((input, Expression { pos, branch }))
+        Ok((input, LocatedAst::new(pos, expr)))
     } else {
         Ok((input, left))
     }
 }
 
-fn include_comparison(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+fn include_comparison(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_term(input)?;
     let (input, op) = opt(alt((
@@ -86,18 +82,18 @@ fn include_comparison(input: Span) -> IResult<Span, Expression, GrammarError<Spa
     if let Some(op) = op {
         let (input, _) = comment_whitespace0(input)?;
         let (input, right) = cut(include_comparison)(input)?;
-        let branch = ExprBranch::Binary(Binary {
+        let branch = Expression::Binary(Binary {
             left: Box::new(left),
             op,
             right: Box::new(right),
         });
-        Ok((input, Expression { pos, branch }))
+        Ok((input, LocatedAst::new(pos, branch)))
     } else {
         Ok((input, left))
     }
 }
 
-fn include_term(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+fn include_term(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_factor(input)?;
     let (input, op) = opt(alt((
@@ -107,17 +103,17 @@ fn include_term(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
     if let Some(op) = op {
         let (input, _) = comment_whitespace0(input)?;
         let (input, right) = cut(include_term)(input)?;
-        let branch = ExprBranch::Binary(Binary {
+        let branch = Expression::Binary(Binary {
             left: Box::new(left),
             op,
             right: Box::new(right),
         });
-        Ok((input, Expression { pos, branch }))
+        Ok((input, LocatedAst::new(pos, branch)))
     } else {
         Ok((input, left))
     }
 }
-fn include_factor(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+fn include_factor(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, left) = include_unary(input)?;
     let (input, op) = opt(alt((
@@ -127,25 +123,33 @@ fn include_factor(input: Span) -> IResult<Span, Expression, GrammarError<Span>> 
     if let Some(op) = op {
         let (input, _) = comment_whitespace0(input)?;
         let (input, right) = cut(include_factor)(input)?;
-        let branch = ExprBranch::Binary(Binary {
+        let branch = Expression::Binary(Binary {
             left: Box::new(left),
             op,
             right: Box::new(right),
         });
-        Ok((input, Expression { pos, branch }))
+        Ok((input, LocatedAst::new(pos, branch)))
     } else {
         Ok((input, left))
     }
 }
 
-fn include_unary(input: Span) -> IResult<Span, Expression, GrammarError<Span>> {
+fn include_unary(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, branch) = alt((
-        map(unary, |u| ExprBranch::Unary(u)),
-        map(grouping, |g| ExprBranch::Grouping(g)),
-        map(literal, |l| ExprBranch::Literal(l)),
+    match map(unary, |u| Expression::Unary(u))(input) {
+        Ok((input, unary)) => Ok((input, LocatedAst::new(pos, unary))),
+        Err(_) => include_primary(input),
+    }
+}
+
+fn include_primary(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
+    let (input, pos) = position(input)?;
+    let (input, expr) = alt((
+        map(grouping, |g| Expression::Grouping(g)),
+        map(literal, |l| Expression::Literal(l)),
+        map(identifier, |v| Expression::Variable(v.fragment())),
     ))(input)?;
-    Ok((input, Expression { pos, branch }))
+    Ok((input, LocatedAst::new(pos, expr)))
 }
 
 // literal        → NUMBER | STRING | "true" | "false" | "nil" ;
@@ -199,24 +203,24 @@ fn string(input: Span) -> IResult<Span, String, GrammarError<Span>> {
             error_kind: GrammarErrorKind::Grammar("Unterminated string."),
         })
     })?;
-    return Ok((input, s.unwrap_or("".to_string())));
+    Ok((input, s.unwrap_or("".to_string())))
 }
 
 // unary          → ( "-" | "!" ) expression ;
 #[derive(Debug, PartialEq)]
 pub enum Unary<'a> {
-    Negative(Box<Expression<'a>>),
-    Not(Box<Expression<'a>>),
+    Negative(Box<LocatedAst<Expression<'a>>>),
+    Not(Box<LocatedAst<Expression<'a>>>),
 }
 
 fn unary(input: Span) -> IResult<Span, Unary, GrammarError<Span>> {
     context(
         "unary",
         alt((
-            map(preceded(tag("-"), cut(expression)), |e| -> Unary {
+            map(preceded(tag("-"), cut(expression)), |e| {
                 Unary::Negative(Box::new(e))
             }),
-            map(preceded(tag("!"), cut(expression)), |e| -> Unary {
+            map(preceded(tag("!"), cut(expression)), |e| {
                 Unary::Not(Box::new(e))
             }),
         )),
@@ -224,7 +228,7 @@ fn unary(input: Span) -> IResult<Span, Unary, GrammarError<Span>> {
 }
 
 // grouping       → "(" expression ")" ;
-fn grouping(input: Span) -> IResult<Span, Box<Expression>, GrammarError<Span>> {
+fn grouping(input: Span) -> IResult<Span, Box<LocatedAst<Expression>>, GrammarError<Span>> {
     let (input, _) = char('(')(input)?;
     let (input, _) = comment_whitespace0(input)?;
     let (input, e) = context("group expression", cut(expression))(input)?;
@@ -289,9 +293,9 @@ mod test {
     #[test]
     fn test_grouping() -> Result<(), Box<dyn Error>> {
         let (_, res) = grouping("(1 + 2)".into())?;
-        if let ExprBranch::Binary(bin) = res.branch {
-            assert_eq!(bin.left.branch, ExprBranch::Literal(Literal::Number(1.0)));
-            assert_eq!(bin.right.branch, ExprBranch::Literal(Literal::Number(2.0)));
+        if let Expression::Binary(bin) = res.ast {
+            assert_eq!(bin.left.ast, Expression::Literal(Literal::Number(1.0)));
+            assert_eq!(bin.right.ast, Expression::Literal(Literal::Number(2.0)));
             assert_eq!(bin.op, Operator::Add);
             Ok(())
         } else {
@@ -302,38 +306,38 @@ mod test {
     #[test]
     fn test_pos() {
         let (_, res) = expression("1-2".into()).unwrap();
-        assert_eq!(res.pos.location_line(), 1);
+        assert_eq!(res.get_line(), 1);
         // let bin = match res.branch {
-        //     ExprBranch::Binary(bin) => bin,
+        //     Expression::Binary(bin) => bin,
         //     _ => panic!("not binary"),
         // };
         // let one = match bin.right.branch {
-        //     ExprBranch::Unary(Unary::Negative(Expression { pos, branch:ExprBranch::Literal(l) })) => u,
+        //     Expression::Unary(Unary::Negative(Expression { pos, branch:Expression::Literal(l) })) => u,
 
         // }
         // assert_eq!(
         //     bin.right.branch,
-        //     ExprBranch::Unary(Unary::Negative(Literal::Number(1.0)))
+        //     Expression::Unary(Unary::Negative(Literal::Number(1.0)))
         // );
         // assert_eq!(
         //     ,
         //     Ok((
         //         "",
-        //         ExprBranch::Binary(Binary {
-        //             left: Box::new(ExprBranch::Grouping(Box::new(ExprBranch::Binary(Binary {
-        //                 left: Box::new(ExprBranch::Literal(Literal::Number(5.0))),
+        //         Expression::Binary(Binary {
+        //             left: Box::new(Expression::Grouping(Box::new(Expression::Binary(Binary {
+        //                 left: Box::new(Expression::Literal(Literal::Number(5.0))),
         //                 op: Operator::Subtract,
-        //                 right: Box::new(ExprBranch::Grouping(Box::new(ExprBranch::Binary(
+        //                 right: Box::new(Expression::Grouping(Box::new(Expression::Binary(
         //                     Binary {
-        //                         left: Box::new(ExprBranch::Literal(Literal::Number(3.0))),
+        //                         left: Box::new(Expression::Literal(Literal::Number(3.0))),
         //                         op: Operator::Subtract,
-        //                         right: Box::new(ExprBranch::Literal(Literal::Number(1.0)))
+        //                         right: Box::new(Expression::Literal(Literal::Number(1.0)))
         //                     }
         //                 ))))
         //             })))),
         //             op: Operator::Add,
-        //             right: Box::new(ExprBranch::Unary(Unary::Negative(Box::new(
-        //                 ExprBranch::Literal(Literal::Number(1.0))
+        //             right: Box::new(Expression::Unary(Unary::Negative(Box::new(
+        //                 Expression::Literal(Literal::Number(1.0))
         //             ))))
         //         })
         //     ))

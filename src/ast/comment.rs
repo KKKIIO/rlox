@@ -4,7 +4,7 @@ use nom::{
     character::complete::{line_ending, multispace1, not_line_ending},
     combinator::{cut, opt, recognize},
     error::{ContextError, ParseError},
-    multi::many0,
+    multi::{many0, many1},
     sequence::tuple,
     IResult,
 };
@@ -27,6 +27,12 @@ pub fn comment_whitespace0<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>
     input: Span<'a>,
 ) -> IResult<Span, Span, E> {
     recognize(many0(alt((line_comment, block_comment, multispace1))))(input)
+}
+
+pub fn comment_whitespace1<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>(
+    input: Span<'a>,
+) -> IResult<Span, Span, E> {
+    recognize(many1(alt((line_comment, block_comment, multispace1))))(input)
 }
 
 mod test {
