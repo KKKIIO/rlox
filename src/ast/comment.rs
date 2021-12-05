@@ -35,6 +35,7 @@ pub fn comment_whitespace1<'a, E: ParseError<Span<'a>> + ContextError<Span<'a>>>
     recognize(many1(alt((line_comment, block_comment, multispace1))))(input)
 }
 
+#[cfg(test)]
 mod test {
     use std::error::Error;
 

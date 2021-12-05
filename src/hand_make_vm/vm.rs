@@ -4,6 +4,8 @@ use std::fmt::Display;
 
 use gpoint::GPoint;
 
+use super::error::InterpreteError;
+
 #[derive(Debug, PartialEq)]
 pub enum OpCode {
     LoadNil,
@@ -75,7 +77,8 @@ impl Chunk {
     pub fn get_global_var_name(&self, i: u16) -> &str {
         &self.global_var_names[i as usize]
     }
-    pub fn add_global_var(&mut self, name: String) -> u16 {
+
+    pub fn get_global_var_name_idx(&mut self, name: &str) -> u16 {
         self.global_var_names
             .iter()
             .position(|n| n == &name)
@@ -83,7 +86,7 @@ impl Chunk {
             .unwrap_or_else(|| {
                 let idx =
                     u16::try_from(self.global_var_names.len()).expect("Too many global variables");
-                self.global_var_names.push(name);
+                self.global_var_names.push(name.to_string());
                 idx
             })
     }
@@ -128,10 +131,6 @@ impl<'a> ChunkBuilder<'a> {
         chunk.add_code(code, self.line);
         self
     }
-
-    pub fn add_global_var(&mut self, name: String) -> u16 {
-        self.chunk.add_global_var(name)
-    }
 }
 struct GlobalEnvironment {
     variables: HashMap<String, Value>,
@@ -139,10 +138,6 @@ struct GlobalEnvironment {
 
 pub struct VM {
     global_env: GlobalEnvironment,
-}
-pub struct RuntimeError {
-    pub message: String,
-    pub line: u32,
 }
 
 static ARITHMETIC_OPERANDS_ERR_MSG: &'static str = "Operands must be numbers.";
@@ -156,7 +151,7 @@ impl VM {
             },
         }
     }
-    pub fn run(&mut self, chunk: &mut Chunk) -> Result<(), RuntimeError> {
+    pub fn run(&mut self, chunk: &mut Chunk) -> Result<(), InterpreteError> {
         let mut stack = vec![];
         let mut ip = 0;
         while ip < chunk.codes.len() {
@@ -184,7 +179,12 @@ impl VM {
                     stack.push(Value::String(s.clone()));
                 }
                 &OpCode::LoadGlobalVar(i) => {
-                    stack.push(self.global_env.variables[chunk.get_global_var_name(i)].clone());
+                    let name = chunk.get_global_var_name(i);
+                    let v = self.global_env.variables.get(name).ok_or(InterpreteError {
+                        message: format!("Undefined variable {}.", name),
+                        line: chunk.get_line(curr_ip),
+                    })?;
+                    stack.push(v.clone());
                 }
                 &OpCode::SetGlobalVar(i) => {
                     let name = chunk.get_global_var_name(i);
@@ -202,7 +202,7 @@ impl VM {
                         (Value::Number(_), Value::Number(_)) => (),
                         (Value::String(_), Value::String(_)) => (),
                         _ => {
-                            return Err(RuntimeError {
+                            return Err(InterpreteError {
                                 message: ADD_OPERANDS_ERR_MSG.to_string(),
                                 line: chunk.get_line(curr_ip),
                             });
@@ -242,7 +242,7 @@ impl VM {
                     match v {
                         Value::Number(n) => *n = -*n,
                         _ => {
-                            return Err(RuntimeError {
+                            return Err(InterpreteError {
                                 message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
                                 line: chunk.get_line(curr_ip),
                             })
@@ -278,14 +278,14 @@ impl VM {
         }
         Ok(())
     }
-    fn try_pop2num(stack: &mut Vec<Value>, line: u32) -> Result<(f64, f64), RuntimeError> {
+    fn try_pop2num(stack: &mut Vec<Value>, line: u32) -> Result<(f64, f64), InterpreteError> {
         let len = stack.len();
         let bi = len - 1;
         let ai = bi - 1;
         let b = match stack[bi] {
             Value::Number(n) => n,
             _ => {
-                return Err(RuntimeError {
+                return Err(InterpreteError {
                     message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
                     line,
                 })
@@ -294,7 +294,7 @@ impl VM {
         let a = match stack[ai] {
             Value::Number(n) => n,
             _ => {
-                return Err(RuntimeError {
+                return Err(InterpreteError {
                     message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
                     line,
                 })

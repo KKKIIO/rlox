@@ -47,12 +47,15 @@ impl<T> LocatedAst<T> {
 #[derive(Debug, PartialEq)]
 pub struct GrammarError<I> {
     pub input: I,
-    pub error_kind: GrammarErrorKind,
+    pub error_kind: GrammarErrorKind<I>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum GrammarErrorKind {
-    Grammar(&'static str),
+pub enum GrammarErrorKind<I> {
+    Grammar {
+        kind: &'static str,
+        at: Option<I>,
+    },
     /// Error kind given by various nom parsers
     Nom(nom::error::ErrorKind),
 }
@@ -74,10 +77,17 @@ impl<I> ContextError<I> for GrammarError<I> {}
 
 impl<'a> Display for GrammarError<Span<'a>> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self.error_kind {
-            GrammarErrorKind::Grammar(s) => {
-                write!(f, "[line {}] Error: {}", self.input.location_line(), s)
-            }
+        match &self.error_kind {
+            &GrammarErrorKind::Grammar { kind, at } => match at {
+                Some(at) => write!(
+                    f,
+                    "[line {}] Error at '{}': {}",
+                    self.input.location_line(),
+                    at.fragment(),
+                    kind
+                ),
+                None => write!(f, "[line {}] Error: {}", self.input.location_line(), kind),
+            },
             GrammarErrorKind::Nom(ref kind) => write!(f, "error {:?} at: {}", kind, self.input),
         }
     }

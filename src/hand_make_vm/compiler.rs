@@ -5,30 +5,37 @@ use crate::ast::{
     statement::{DeclOrStmt, Statement},
 };
 
-use super::vm::{Chunk, OpCode};
+use super::{
+    error::InterpreteError,
+    vm::{Chunk, OpCode},
+};
 
 pub struct Compiler {}
 impl Compiler {
     pub fn new() -> Compiler {
         return Compiler {};
     }
-    pub fn compile_program(&self, program: &Program) -> Chunk {
+    pub fn compile_program(&self, program: &Program) -> Result<Chunk, InterpreteError> {
         let mut chunk = Chunk::new();
         for stmt in program.statements.iter() {
-            self.compile_statement(&mut chunk, &stmt);
+            self.compile_statement(&mut chunk, &stmt)?;
         }
-        chunk
+        Ok(chunk)
     }
 
-    pub fn compile_statement<'a, 'c>(&self, chunk: &mut Chunk, ds: &DeclOrStmt<'a>) {
+    pub fn compile_statement<'a, 'c>(
+        &self,
+        chunk: &mut Chunk,
+        ds: &DeclOrStmt<'a>,
+    ) -> Result<(), InterpreteError> {
         match ds {
             &DeclOrStmt::Decl(ref d) => {
                 if let Some(init_expr) = &d.ast.init_expr {
-                    let name_idx = chunk.add_global_var(d.ast.name.to_string());
-                    self.compile_expression(chunk, init_expr);
+                    let name_idx = chunk.get_global_var_name_idx(d.ast.name);
+                    self.compile_expression(chunk, init_expr)?;
                     chunk.add_code(OpCode::SetGlobalVar(name_idx), d.get_line());
                 } else {
-                    let name_idx = chunk.add_global_var(d.ast.name.to_string());
+                    let name_idx = chunk.get_global_var_name_idx(d.ast.name);
                     chunk
                         .build_for(d.get_line())
                         .add_code(OpCode::LoadNil)
@@ -37,16 +44,22 @@ impl Compiler {
             }
             &DeclOrStmt::Stmt(ref stmt) => match &stmt.ast {
                 Statement::Expression(expr) => {
-                    self.compile_expression(chunk, expr);
+                    self.compile_expression(chunk, expr)?;
                 }
                 Statement::Print(expr) => {
-                    self.compile_expression(chunk, expr);
+                    self.compile_expression(chunk, expr)?;
                     chunk.build_for(stmt.get_line()).add_code(OpCode::Print);
                 }
             },
-        }
+        };
+        Ok(())
     }
-    fn compile_expression(&self, chunk: &mut Chunk, expr: &LocatedAst<Expression>) {
+
+    fn compile_expression(
+        &self,
+        chunk: &mut Chunk,
+        expr: &LocatedAst<Expression>,
+    ) -> Result<(), InterpreteError> {
         match &expr.ast {
             Expression::Literal(l) => {
                 let mut builder = chunk.build_for(expr.get_line());
@@ -63,12 +76,12 @@ impl Compiler {
                     Unary::Negative(n) => (OpCode::Negate, n),
                     Unary::Not(n) => (OpCode::Not, n),
                 };
-                self.compile_expression(chunk, u_expr);
+                self.compile_expression(chunk, u_expr)?;
                 chunk.build_for(expr.get_line()).add_code(op_code);
             }
             Expression::Binary(b) => {
-                self.compile_expression(chunk, &b.left);
-                self.compile_expression(chunk, &b.right);
+                self.compile_expression(chunk, &b.left)?;
+                self.compile_expression(chunk, &b.right)?;
                 let mut builder = chunk.build_for(expr.get_line());
                 match b.op {
                     Operator::Equal => builder.add_code(OpCode::Equal),
@@ -83,9 +96,15 @@ impl Compiler {
                     Operator::Divide => builder.add_code(OpCode::Divide),
                 };
             }
-            Expression::Grouping(g) => self.compile_expression(chunk, &g),
-            Expression::Variable(_) => todo!(),
+            Expression::Grouping(g) => self.compile_expression(chunk, &g)?,
+            &Expression::Variable(v) => {
+                let name_idx = chunk.get_global_var_name_idx(v);
+                chunk
+                    .build_for(expr.get_line())
+                    .add_code(OpCode::LoadGlobalVar(name_idx));
+            }
         }
+        Ok(())
     }
 }
 
@@ -99,7 +118,7 @@ mod test {
     fn test_compile_program() {
         let program = parse_source("print 1;".into()).unwrap();
         let compiler = Compiler {};
-        let chunk = compiler.compile_program(&program);
+        let chunk = compiler.compile_program(&program).unwrap();
         chunk.print_chunk("test");
     }
 }

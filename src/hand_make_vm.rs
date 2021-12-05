@@ -1,8 +1,9 @@
 use crate::ast::program::Program;
 
-use self::{compiler::Compiler, vm::RuntimeError};
+use self::{compiler::Compiler, error::InterpreteError};
 
 pub mod compiler;
+pub mod error;
 pub mod vm;
 
 pub struct HandMakeVM {
@@ -18,8 +19,8 @@ impl HandMakeVM {
         }
     }
 
-    pub fn run(&mut self, program: &Program) -> Result<(), RuntimeError> {
-        let mut chunk = self.compiler.compile_program(program);
+    pub fn run(&mut self, program: &Program) -> Result<(), InterpreteError> {
+        let mut chunk = self.compiler.compile_program(program)?;
         self.vm.run(&mut chunk)
     }
 }

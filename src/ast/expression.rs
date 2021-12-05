@@ -74,10 +74,10 @@ fn include_comparison(input: Span) -> IResult<Span, LocatedAst<Expression>, Gram
     let (input, pos) = position(input)?;
     let (input, left) = include_term(input)?;
     let (input, op) = opt(alt((
-        map(char('<'), |_| -> Operator { Operator::Less }),
         map(tag("<="), |_| -> Operator { Operator::LessEqual }),
-        map(char('>'), |_| -> Operator { Operator::Greater }),
+        map(char('<'), |_| -> Operator { Operator::Less }),
         map(tag(">="), |_| -> Operator { Operator::GreaterEqual }),
+        map(char('>'), |_| -> Operator { Operator::Greater }),
     )))(input)?;
     if let Some(op) = op {
         let (input, _) = comment_whitespace0(input)?;
@@ -200,7 +200,10 @@ fn string(input: Span) -> IResult<Span, String, GrammarError<Span>> {
                 nom::Err::Failure(e) => e.input,
                 nom::Err::Incomplete(_) => unreachable!(),
             },
-            error_kind: GrammarErrorKind::Grammar("Unterminated string."),
+            error_kind: GrammarErrorKind::Grammar {
+                kind: "Unterminated string.",
+                at: None,
+            },
         })
     })?;
     Ok((input, s.unwrap_or("".to_string())))
@@ -271,7 +274,10 @@ mod test {
         };
         assert_eq!(
             err.error_kind,
-            GrammarErrorKind::Grammar("Unterminated string."),
+            GrammarErrorKind::Grammar {
+                kind: "Unterminated string.",
+                at: None,
+            },
         );
     }
 

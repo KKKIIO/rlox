@@ -1,13 +1,10 @@
 use nom::{
-    bytes::complete::take_while1,
-    character::complete::anychar,
-    combinator::{cut, verify},
-    error::ParseError,
+    bytes::complete::take_while1, character::complete::anychar, combinator::cut, error::ParseError,
     IResult,
 };
 use phf::{phf_set, Set};
 
-use super::parse::{GrammarError, Span};
+use super::parse::{GrammarError, GrammarErrorKind, Span};
 
 static KEYWORDS: Set<&'static str> = phf_set! {
   "and",
@@ -29,7 +26,18 @@ static KEYWORDS: Set<&'static str> = phf_set! {
 };
 
 pub fn identifier(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
-    verify(identifier_or_keyword, |i| !KEYWORDS.contains(i))(input)
+    let (consumed_input, word) = identifier_or_keyword(input)?;
+    if KEYWORDS.contains(word.fragment()) {
+        Err(nom::Err::Failure(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Grammar {
+                kind: "Expect variable name.",
+                at: Some(word),
+            },
+        }))
+    } else {
+        Ok((consumed_input, word))
+    }
 }
 
 fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
