@@ -136,10 +136,20 @@ fn include_factor(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 
 fn include_unary(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    match map(unary, |u| Expression::Unary(u))(input) {
-        Ok((input, unary)) => Ok((input, LocatedAst::new(pos, unary))),
-        Err(_) => include_primary(input),
-    }
+    alt((
+        map(
+            alt((
+                map(preceded(tag("-"), cut(include_unary)), |e| {
+                    Unary::Negative(Box::new(e))
+                }),
+                map(preceded(tag("!"), cut(include_unary)), |e| {
+                    Unary::Not(Box::new(e))
+                }),
+            )),
+            move |u| LocatedAst::new(pos, Expression::Unary(u)),
+        ),
+        include_primary,
+    ))(input)
 }
 
 fn include_primary(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
@@ -216,20 +226,6 @@ pub enum Unary<'a> {
     Not(Box<LocatedAst<Expression<'a>>>),
 }
 
-fn unary(input: Span) -> IResult<Span, Unary, GrammarError<Span>> {
-    context(
-        "unary",
-        alt((
-            map(preceded(tag("-"), cut(expression)), |e| {
-                Unary::Negative(Box::new(e))
-            }),
-            map(preceded(tag("!"), cut(expression)), |e| {
-                Unary::Not(Box::new(e))
-            }),
-        )),
-    )(input)
-}
-
 // grouping       → "(" expression ")" ;
 fn grouping(input: Span) -> IResult<Span, Box<LocatedAst<Expression>>, GrammarError<Span>> {
     let (input, _) = char('(')(input)?;
@@ -294,6 +290,26 @@ mod test {
         let (_, res) = literal("nil".into())?;
         assert_eq!(res, Literal::Nil);
         Ok(())
+    }
+
+    #[test]
+    fn test_unary() {
+        let (_, res) = expression("-0 < 0".into()).unwrap();
+        if let Expression::Binary(Binary {
+            left:
+                box LocatedAst {
+                    ast: Expression::Unary(Unary::Negative(box LocatedAst { ast: left, .. })),
+                    ..
+                },
+            op: crate::ast::expression::Operator::Less,
+            right,
+        }) = res.ast
+        {
+            assert_eq!(left, Expression::Literal(Literal::Number(0.0)));
+            assert_eq!(right.ast, Expression::Literal(Literal::Number(0.0)));
+        } else {
+            panic!("Expected binary expression, got {:?}", res.ast);
+        }
     }
 
     #[test]

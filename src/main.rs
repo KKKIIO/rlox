@@ -1,3 +1,4 @@
+#![feature(box_patterns)]
 use std::{
     env::args,
     fs::File,

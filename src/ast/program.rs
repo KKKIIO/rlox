@@ -46,7 +46,10 @@ mod test {
         };
         assert_eq!(
             err.error_kind,
-            GrammarErrorKind::Grammar("Unterminated string.",)
+            GrammarErrorKind::Grammar {
+                kind: "Unterminated string.",
+                at: None,
+            }
         );
     }
 }
