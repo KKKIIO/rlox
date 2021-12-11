@@ -53,7 +53,7 @@ fn main() {
             match parse_source(line.into()) {
                 Ok(program) => {
                     if let Err(err) = vm.run(&program) {
-                        println!("{}\n[line {}]", err.message, err.line);
+                        println!("{}\n[line {}] in script", err.message, err.line);
                     }
                 }
                 Err(e) => {

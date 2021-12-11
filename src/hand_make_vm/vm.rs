@@ -1,21 +1,25 @@
+use core::fmt::Debug;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::fmt::Display;
+use std::{convert::TryFrom, ops::Deref};
 
 use gpoint::GPoint;
 
 use super::error::InterpreteError;
 
 #[derive(Debug, PartialEq)]
-pub enum OpCode {
+pub enum OpCode<Str>
+where
+    Str: Deref<Target = str> + Debug,
+{
     LoadNil,
     LoadFalse,
     LoadTrue,
     LoadNumber(f64),
     LoadConstStr(u8),
     LoadConstStrLong(u32),
-    LoadGlobalVar(u16),
-    SetGlobalVar(u16),
+    LoadGlobalVar(Str),
+    SetGlobalVar(Str),
     Equal,
     Less,
     Greater,
@@ -48,47 +52,35 @@ impl Display for Value {
     }
 }
 
-pub struct Chunk {
-    pub codes: Vec<OpCode>,
+pub struct Chunk<Str>
+where
+    Str: Deref<Target = str> + Debug,
+{
+    pub codes: Vec<OpCode<Str>>,
     lines: Vec<u32>,
     pub const_str_pool: Vec<String>,
-    global_var_names: Vec<String>,
 }
 
-impl Chunk {
-    pub fn new() -> Chunk {
+impl<Str> Chunk<Str>
+where
+    Str: Deref<Target = str> + Debug,
+{
+    pub fn new() -> Chunk<Str> {
         return Chunk {
             codes: vec![],
             lines: vec![],
             const_str_pool: vec![],
-            global_var_names: vec![],
         };
     }
-    pub fn build_for(&mut self, line: u32) -> ChunkBuilder {
+
+    pub fn build_for<'c>(&'c mut self, line: u32) -> ChunkBuilder<'c, Str> {
         ChunkBuilder { chunk: self, line }
     }
 
-    pub fn add_code(&mut self, code: OpCode, line: u32) {
+    pub fn add_code(&mut self, code: OpCode<Str>, line: u32) {
         assert_eq!(self.codes.len(), self.lines.len());
         self.codes.push(code);
         self.lines.push(line);
-    }
-
-    pub fn get_global_var_name(&self, i: u16) -> &str {
-        &self.global_var_names[i as usize]
-    }
-
-    pub fn get_global_var_name_idx(&mut self, name: &str) -> u16 {
-        self.global_var_names
-            .iter()
-            .position(|n| n == &name)
-            .map(|i| i as u16)
-            .unwrap_or_else(|| {
-                let idx =
-                    u16::try_from(self.global_var_names.len()).expect("Too many global variables");
-                self.global_var_names.push(name.to_string());
-                idx
-            })
     }
 
     pub fn get_line(&self, ip: usize) -> u32 {
@@ -108,13 +100,19 @@ impl Chunk {
     }
 }
 
-pub struct ChunkBuilder<'a> {
-    chunk: &'a mut Chunk,
+pub struct ChunkBuilder<'c, Str>
+where
+    Str: Deref<Target = str> + Debug,
+{
+    chunk: &'c mut Chunk<Str>,
     line: u32,
 }
 
-impl<'a> ChunkBuilder<'a> {
-    pub fn add_code(&mut self, code: OpCode) -> &mut Self {
+impl<'c, Str> ChunkBuilder<'c, Str>
+where
+    Str: Deref<Target = str> + Debug,
+{
+    pub fn add_code(&mut self, code: OpCode<Str>) -> &mut Self {
         self.chunk.add_code(code, self.line);
         self
     }
@@ -140,6 +138,7 @@ pub struct VM {
     global_env: GlobalEnvironment,
 }
 
+static ARITHMETIC_OPERAND_ERR_MSG: &'static str = "Operand must be a number.";
 static ARITHMETIC_OPERANDS_ERR_MSG: &'static str = "Operands must be numbers.";
 static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two strings.";
 
@@ -151,7 +150,11 @@ impl VM {
             },
         }
     }
-    pub fn run(&mut self, chunk: &mut Chunk) -> Result<(), InterpreteError> {
+
+    pub fn run<Str>(&mut self, chunk: &mut Chunk<Str>) -> Result<(), InterpreteError>
+    where
+        Str: Deref<Target = str> + Debug,
+    {
         let mut stack = vec![];
         let mut ip = 0;
         while ip < chunk.codes.len() {
@@ -178,18 +181,20 @@ impl VM {
                     let s = &chunk.const_str_pool[usize::try_from(i).unwrap()];
                     stack.push(Value::String(s.clone()));
                 }
-                &OpCode::LoadGlobalVar(i) => {
-                    let name = chunk.get_global_var_name(i);
-                    let v = self.global_env.variables.get(name).ok_or(InterpreteError {
-                        message: format!("Undefined variable {}.", name),
-                        line: chunk.get_line(curr_ip),
-                    })?;
+                OpCode::LoadGlobalVar(name) => {
+                    let v = self
+                        .global_env
+                        .variables
+                        .get(name.deref())
+                        .ok_or(InterpreteError {
+                            message: format!("Undefined variable {}.", name.deref()),
+                            line: chunk.get_line(curr_ip),
+                        })?;
                     stack.push(v.clone());
                 }
-                &OpCode::SetGlobalVar(i) => {
-                    let name = chunk.get_global_var_name(i);
+                OpCode::SetGlobalVar(name) => {
                     let value = stack.pop().unwrap();
-                    if let Some(v) = self.global_env.variables.get_mut(name) {
+                    if let Some(v) = self.global_env.variables.get_mut(name.deref()) {
                         *v = value;
                     } else {
                         self.global_env.variables.insert(name.to_string(), value);
@@ -243,7 +248,7 @@ impl VM {
                         Value::Number(n) => *n = -*n,
                         _ => {
                             return Err(InterpreteError {
-                                message: ARITHMETIC_OPERANDS_ERR_MSG.to_string(),
+                                message: ARITHMETIC_OPERAND_ERR_MSG.to_string(),
                                 line: chunk.get_line(curr_ip),
                             })
                         }

@@ -1,3 +1,8 @@
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
+
 use crate::ast::{
     expression::{Expression, Literal, Operator, Unary},
     parse::LocatedAst,
@@ -10,44 +15,79 @@ use super::{
     vm::{Chunk, OpCode},
 };
 
+pub struct StrPool {
+    pool: RefCell<Vec<Rc<str>>>,
+}
+
+impl StrPool {
+    pub fn new() -> Self {
+        Self {
+            pool: RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn register(&self, name: &str) -> Rc<str> {
+        let idx = if let Some(i) = self
+            .pool
+            .borrow()
+            .iter()
+            .position(|n| (*n).as_ref() == name)
+        {
+            i
+        } else {
+            let mut p = self.pool.borrow_mut();
+            p.push(name.to_string().into_boxed_str().into());
+            p.len() - 1
+        };
+        Ref::map(self.pool.borrow(), |p| &p[idx]).clone()
+    }
+}
+
 pub struct Compiler {}
 impl Compiler {
     pub fn new() -> Compiler {
         return Compiler {};
     }
-    pub fn compile_program(&self, program: &Program) -> Result<Chunk, InterpreteError> {
+    pub fn compile_program(
+        &self,
+        program: &Program,
+        str_pool: &StrPool,
+    ) -> Result<Chunk<Rc<str>>, InterpreteError> {
         let mut chunk = Chunk::new();
         for stmt in program.statements.iter() {
-            self.compile_statement(&mut chunk, &stmt)?;
+            self.compile_statement(&mut chunk, &stmt, str_pool)?;
         }
         Ok(chunk)
     }
 
-    pub fn compile_statement<'a, 'c>(
+    pub fn compile_statement<'a, 'c, 'p>(
         &self,
-        chunk: &mut Chunk,
+        chunk: &'c mut Chunk<Rc<str>>,
         ds: &DeclOrStmt<'a>,
+        str_pool: &'p StrPool,
     ) -> Result<(), InterpreteError> {
         match ds {
             &DeclOrStmt::Decl(ref d) => {
                 if let Some(init_expr) = &d.ast.init_expr {
-                    let name_idx = chunk.get_global_var_name_idx(d.ast.name);
-                    self.compile_expression(chunk, init_expr)?;
-                    chunk.add_code(OpCode::SetGlobalVar(name_idx), d.get_line());
+                    self.compile_expression(chunk, init_expr, str_pool)?;
+                    chunk.add_code(
+                        OpCode::SetGlobalVar(str_pool.register(d.ast.name)),
+                        d.get_line(),
+                    );
                 } else {
-                    let name_idx = chunk.get_global_var_name_idx(d.ast.name);
-                    chunk
-                        .build_for(d.get_line())
-                        .add_code(OpCode::LoadNil)
-                        .add_code(OpCode::SetGlobalVar(name_idx));
+                    chunk.add_code(OpCode::LoadNil, d.get_line());
+                    chunk.add_code(
+                        OpCode::SetGlobalVar(str_pool.register(d.ast.name)),
+                        d.get_line(),
+                    );
                 }
             }
             &DeclOrStmt::Stmt(ref stmt) => match &stmt.ast {
                 Statement::Expression(expr) => {
-                    self.compile_expression(chunk, expr)?;
+                    self.compile_expression(chunk, expr, str_pool)?;
                 }
                 Statement::Print(expr) => {
-                    self.compile_expression(chunk, expr)?;
+                    self.compile_expression(chunk, expr, str_pool)?;
                     chunk.build_for(stmt.get_line()).add_code(OpCode::Print);
                 }
             },
@@ -55,10 +95,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_expression(
+    fn compile_expression<'c, 'p>(
         &self,
-        chunk: &mut Chunk,
-        expr: &LocatedAst<Expression>,
+        chunk: &'c mut Chunk<Rc<str>>,
+        expr: &'_ LocatedAst<Expression>,
+        str_pool: &'p StrPool,
     ) -> Result<(), InterpreteError> {
         match &expr.ast {
             Expression::Literal(l) => {
@@ -76,12 +117,12 @@ impl Compiler {
                     Unary::Negative(n) => (OpCode::Negate, n),
                     Unary::Not(n) => (OpCode::Not, n),
                 };
-                self.compile_expression(chunk, u_expr)?;
-                chunk.build_for(expr.get_line()).add_code(op_code);
+                self.compile_expression(chunk, u_expr, str_pool)?;
+                chunk.add_code(op_code, expr.get_line());
             }
             Expression::Binary(b) => {
-                self.compile_expression(chunk, &b.left)?;
-                self.compile_expression(chunk, &b.right)?;
+                self.compile_expression(chunk, &b.left, str_pool)?;
+                self.compile_expression(chunk, &b.right, str_pool)?;
                 let mut builder = chunk.build_for(expr.get_line());
                 match b.op {
                     Operator::Equal => builder.add_code(OpCode::Equal),
@@ -96,12 +137,9 @@ impl Compiler {
                     Operator::Divide => builder.add_code(OpCode::Divide),
                 };
             }
-            Expression::Grouping(g) => self.compile_expression(chunk, &g)?,
+            Expression::Grouping(g) => self.compile_expression(chunk, &g, str_pool)?,
             &Expression::Variable(v) => {
-                let name_idx = chunk.get_global_var_name_idx(v);
-                chunk
-                    .build_for(expr.get_line())
-                    .add_code(OpCode::LoadGlobalVar(name_idx));
+                chunk.add_code(OpCode::LoadGlobalVar(str_pool.register(v)), expr.get_line());
             }
         }
         Ok(())
@@ -118,7 +156,8 @@ mod test {
     fn test_compile_program() {
         let program = parse_source("print 1;".into()).unwrap();
         let compiler = Compiler {};
-        let chunk = compiler.compile_program(&program).unwrap();
+        let str_pool = StrPool::new();
+        let chunk = compiler.compile_program(&program, &str_pool).unwrap();
         chunk.print_chunk("test");
     }
 }
