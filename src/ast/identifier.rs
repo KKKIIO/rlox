@@ -28,7 +28,7 @@ static KEYWORDS: Set<&'static str> = phf_set! {
 pub fn identifier(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
     let (consumed_input, word) = identifier_or_keyword(input)?;
     if KEYWORDS.contains(word.fragment()) {
-        Err(nom::Err::Failure(GrammarError {
+        Err(nom::Err::Error(GrammarError {
             input,
             error_kind: GrammarErrorKind::Grammar {
                 kind: "Expect variable name.",

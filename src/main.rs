@@ -1,3 +1,4 @@
+#![feature(destructuring_assignment)]
 #![feature(box_patterns)]
 use std::{
     env::args,

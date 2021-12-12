@@ -5,6 +5,8 @@ use std::{convert::TryFrom, ops::Deref};
 
 use gpoint::GPoint;
 
+use crate::ast::parse::LocatedAst;
+
 use super::error::InterpreteError;
 
 #[derive(Debug, PartialEq)]
@@ -18,8 +20,8 @@ where
     LoadNumber(f64),
     LoadConstStr(u8),
     LoadConstStrLong(u32),
-    LoadGlobalVar(Str),
-    SetGlobalVar(Str),
+    LoadVar(Str),
+    SetVar(Str),
     Equal,
     Less,
     Greater,
@@ -30,6 +32,7 @@ where
     Not,
     Negate,
     Print,
+    Pop,
     // Return,
 }
 
@@ -73,8 +76,11 @@ where
         };
     }
 
-    pub fn build_for<'c>(&'c mut self, line: u32) -> ChunkBuilder<'c, Str> {
-        ChunkBuilder { chunk: self, line }
+    pub fn build_for<'c, T>(&'c mut self, ast: &LocatedAst<T>) -> ChunkBuilder<'c, Str> {
+        ChunkBuilder {
+            chunk: self,
+            line: ast.get_line(),
+        }
     }
 
     pub fn add_code(&mut self, code: OpCode<Str>, line: u32) {
@@ -112,7 +118,7 @@ impl<'c, Str> ChunkBuilder<'c, Str>
 where
     Str: Deref<Target = str> + Debug,
 {
-    pub fn add_code(&mut self, code: OpCode<Str>) -> &mut Self {
+    pub fn code(&mut self, code: OpCode<Str>) -> &mut Self {
         self.chunk.add_code(code, self.line);
         self
     }
@@ -181,19 +187,19 @@ impl VM {
                     let s = &chunk.const_str_pool[usize::try_from(i).unwrap()];
                     stack.push(Value::String(s.clone()));
                 }
-                OpCode::LoadGlobalVar(name) => {
+                OpCode::LoadVar(name) => {
                     let v = self
                         .global_env
                         .variables
                         .get(name.deref())
                         .ok_or(InterpreteError {
-                            message: format!("Undefined variable {}.", name.deref()),
+                            message: format!("Undefined variable '{}'.", name.deref()),
                             line: chunk.get_line(curr_ip),
                         })?;
                     stack.push(v.clone());
                 }
-                OpCode::SetGlobalVar(name) => {
-                    let value = stack.pop().unwrap();
+                OpCode::SetVar(name) => {
+                    let value = stack.last().unwrap().clone();
                     if let Some(v) = self.global_env.variables.get_mut(name.deref()) {
                         *v = value;
                     } else {
@@ -254,10 +260,6 @@ impl VM {
                         }
                     }
                 }
-                // OpCode::Return => {
-                //     println!("{}", stack.pop().unwrap());
-                //     break;
-                // }
                 OpCode::Print => println!("{}", stack.pop().unwrap()),
                 OpCode::LoadNil => stack.push(Value::Nil),
                 OpCode::LoadTrue => stack.push(Value::Bool(true)),
@@ -279,7 +281,10 @@ impl VM {
                     let v = stack.pop().unwrap();
                     stack.push(Value::Bool(Self::is_falsey(&v)));
                 }
-            }
+                OpCode::Pop => {
+                    stack.pop().unwrap();
+                }
+            };
         }
         Ok(())
     }

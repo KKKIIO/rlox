@@ -1,8 +1,8 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::digit1,
-    combinator::{cut, map, opt, recognize, value},
+    character::complete::{digit1, none_of},
+    combinator::{cut, map, opt, peek, recognize, value},
     error::context,
     sequence::{terminated, tuple},
     IResult,
@@ -22,6 +22,7 @@ use super::{
 
 #[derive(Debug, PartialEq)]
 pub enum Expression<'a> {
+    Assignment(Assignment<'a>),
     Literal(Literal),
     Unary(Unary<'a>),
     Binary(Binary<'a>),
@@ -29,17 +30,45 @@ pub enum Expression<'a> {
     Variable(&'a str),
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Assignment<'a> {
+    pub id: Span<'a>,
+    pub expr: Box<LocatedAst<Expression<'a>>>,
+}
+
 /// going from lowest to highest.
 ///
 /// Name|	Operators|	Associates
 /// ---|---|---
+/// Assignment|	=	|Right
 /// Equality|	== !=	|Left
 /// Comparison|	> >= < <=	|Left
 /// Term|	- +	|Left
 /// Factor|	/ *	|Left
 /// Unary|	! -	|Right
 pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
-    include_equality(input)
+    include_assignment(input)
+}
+
+fn include_assignment(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
+    let (input, pos) = position(input)?;
+    let (input, prefix) = opt(tuple((
+        identifier,
+        comment_whitespace0,
+        tag("="),
+        peek(none_of("=")),
+    )))(input)?;
+    if let Some((id, _, _, _)) = prefix {
+        let (input, _) = comment_whitespace0(input)?;
+        let (input, expr) = cut(include_assignment)(input)?;
+        let expr = Expression::Assignment(Assignment {
+            id,
+            expr: Box::new(expr),
+        });
+        Ok((input, LocatedAst::new(pos, expr)))
+    } else {
+        include_equality(input)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,22 +80,28 @@ pub struct Binary<'a> {
 
 fn include_equality(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, left) = include_comparison(input)?;
-    let (input, op) = opt(alt((
-        map(tag("=="), |_| -> Operator { Operator::Equal }),
-        map(tag("!="), |_| -> Operator { Operator::NotEqual }),
-    )))(input)?;
-    if let Some(op) = op {
-        let (input, _) = comment_whitespace0(input)?;
-        let (input, right) = cut(include_equality)(input)?;
-        let expr = Expression::Binary(Binary {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        });
-        Ok((input, LocatedAst::new(pos, expr)))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = include_comparison(input)?;
+    loop {
+        let op: Option<Operator>;
+        (input, op) = opt(alt((
+            map(tag("=="), |_| -> Operator { Operator::Equal }),
+            map(tag("!="), |_| -> Operator { Operator::NotEqual }),
+        )))(input)?;
+        if let Some(op) = op {
+            input = comment_whitespace0(input)?.0;
+            let right: LocatedAst<Expression>;
+            (input, right) = cut(include_comparison)(input)?;
+            left = LocatedAst::new(
+                pos.clone(),
+                Expression::Binary(Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }),
+            );
+        } else {
+            break Ok((input, left));
+        }
     }
 }
 
@@ -326,43 +361,53 @@ mod test {
     }
 
     #[test]
-    fn test_pos() {
-        let (_, res) = expression("1-2".into()).unwrap();
-        assert_eq!(res.get_line(), 1);
-        // let bin = match res.branch {
-        //     Expression::Binary(bin) => bin,
-        //     _ => panic!("not binary"),
-        // };
-        // let one = match bin.right.branch {
-        //     Expression::Unary(Unary::Negative(Expression { pos, branch:Expression::Literal(l) })) => u,
+    fn test_assigment() {
+        let (_, res) = expression("a = b = 1".into()).unwrap();
+        match res.ast {
+            Expression::Assignment(Assignment {
+                id: a,
+                expr:
+                    box LocatedAst {
+                        ast:
+                            Expression::Assignment(Assignment {
+                                id: b,
+                                expr: box LocatedAst { ast: v, .. },
+                                ..
+                            }),
+                        ..
+                    },
+            }) => {
+                assert_eq!(a.fragment(), &"a");
+                assert_eq!(b.fragment(), &"b");
+                assert_eq!(v, Expression::Literal(Literal::Number(1.0)));
+            }
+            _ => panic!("Expected assignment, got {:?}", res.ast),
+        }
+    }
 
-        // }
-        // assert_eq!(
-        //     bin.right.branch,
-        //     Expression::Unary(Unary::Negative(Literal::Number(1.0)))
-        // );
-        // assert_eq!(
-        //     ,
-        //     Ok((
-        //         "",
-        //         Expression::Binary(Binary {
-        //             left: Box::new(Expression::Grouping(Box::new(Expression::Binary(Binary {
-        //                 left: Box::new(Expression::Literal(Literal::Number(5.0))),
-        //                 op: Operator::Subtract,
-        //                 right: Box::new(Expression::Grouping(Box::new(Expression::Binary(
-        //                     Binary {
-        //                         left: Box::new(Expression::Literal(Literal::Number(3.0))),
-        //                         op: Operator::Subtract,
-        //                         right: Box::new(Expression::Literal(Literal::Number(1.0)))
-        //                     }
-        //                 ))))
-        //             })))),
-        //             op: Operator::Add,
-        //             right: Box::new(Expression::Unary(Unary::Negative(Box::new(
-        //                 Expression::Literal(Literal::Number(1.0))
-        //             ))))
-        //         })
-        //     ))
-        // );
+    #[test]
+    fn test_equality() {
+        let (_, res) = expression("false == true == true".into()).unwrap();
+        match res.ast {
+            Expression::Binary(Binary {
+                left:
+                    box LocatedAst {
+                        ast:
+                            Expression::Binary(Binary {
+                                left: box LocatedAst { ast: v1, .. },
+                                op: Operator::Equal,
+                                right: box LocatedAst { ast: v2, .. },
+                            }),
+                        ..
+                    },
+                op: Operator::Equal,
+                right: box LocatedAst { ast: v3, .. },
+            }) => {
+                assert_eq!(v1, Expression::Literal(Literal::False));
+                assert_eq!(v2, Expression::Literal(Literal::True));
+                assert_eq!(v3, Expression::Literal(Literal::True));
+            }
+            _ => panic!("Expected binary expression, got {:?}", res.ast),
+        }
     }
 }

@@ -21,27 +21,29 @@ impl<T> LocatedAst<T> {
             line: pos.location_line(),
         }
     }
+
     pub fn get_line(&self) -> u32 {
         self.line
     }
-    pub fn include_pos<'a, F>(
-        mut parser: F,
-    ) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>
-    where
-        F: Parser<Span<'a>, T, GrammarError<Span<'a>>>,
-    {
-        move |input: Span| {
-            let (input, pos) = position(input)?;
-            let (input, ast) = parser.parse(input)?;
-            Ok((
-                input,
-                Self {
-                    ast,
-                    line: pos.location_line(),
-                },
-            ))
-        }
-    }
+
+    // pub fn include_pos<'a, F>(
+    //     mut parser: F,
+    // ) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>
+    // where
+    //     F: Parser<Span<'a>, T, GrammarError<Span<'a>>>,
+    // {
+    //     move |input: Span| {
+    //         let (input, pos) = position(input)?;
+    //         let (input, ast) = parser.parse(input)?;
+    //         Ok((
+    //             input,
+    //             Self {
+    //                 ast,
+    //                 line: pos.location_line(),
+    //             },
+    //         ))
+    //     }
+    // }
 }
 
 #[derive(Debug, PartialEq)]

@@ -1,7 +1,4 @@
-use std::{
-    cell::{Ref, RefCell},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::ast::{
     expression::{Expression, Literal, Operator, Unary},
@@ -27,19 +24,19 @@ impl StrPool {
     }
 
     pub fn register(&self, name: &str) -> Rc<str> {
-        let idx = if let Some(i) = self
+        let pos_res = self
             .pool
             .borrow()
             .iter()
-            .position(|n| (*n).as_ref() == name)
-        {
+            .position(|n| (*n).as_ref() == name);
+        let idx = if let Some(i) = pos_res {
             i
         } else {
             let mut p = self.pool.borrow_mut();
             p.push(name.to_string().into_boxed_str().into());
             p.len() - 1
         };
-        Ref::map(self.pool.borrow(), |p| &p[idx]).clone()
+        self.pool.borrow().get(idx).unwrap().clone()
     }
 }
 
@@ -70,25 +67,22 @@ impl Compiler {
             &DeclOrStmt::Decl(ref d) => {
                 if let Some(init_expr) = &d.ast.init_expr {
                     self.compile_expression(chunk, init_expr, str_pool)?;
-                    chunk.add_code(
-                        OpCode::SetGlobalVar(str_pool.register(d.ast.name)),
-                        d.get_line(),
-                    );
                 } else {
-                    chunk.add_code(OpCode::LoadNil, d.get_line());
-                    chunk.add_code(
-                        OpCode::SetGlobalVar(str_pool.register(d.ast.name)),
-                        d.get_line(),
-                    );
+                    chunk.build_for(d).code(OpCode::LoadNil);
                 }
+                chunk
+                    .build_for(d)
+                    .code(OpCode::SetVar(str_pool.register(d.ast.name)))
+                    .code(OpCode::Pop);
             }
             &DeclOrStmt::Stmt(ref stmt) => match &stmt.ast {
                 Statement::Expression(expr) => {
                     self.compile_expression(chunk, expr, str_pool)?;
+                    chunk.add_code(OpCode::Pop, stmt.get_line());
                 }
                 Statement::Print(expr) => {
                     self.compile_expression(chunk, expr, str_pool)?;
-                    chunk.build_for(stmt.get_line()).add_code(OpCode::Print);
+                    chunk.add_code(OpCode::Print, stmt.get_line());
                 }
             },
         };
@@ -103,13 +97,13 @@ impl Compiler {
     ) -> Result<(), InterpreteError> {
         match &expr.ast {
             Expression::Literal(l) => {
-                let mut builder = chunk.build_for(expr.get_line());
+                let mut builder = chunk.build_for(expr);
                 match l {
-                    Literal::Number(n) => builder.add_code(OpCode::LoadNumber(*n)),
+                    Literal::Number(n) => builder.code(OpCode::LoadNumber(*n)),
                     Literal::String(s) => builder.add_const_str(s.clone()),
-                    Literal::True => builder.add_code(OpCode::LoadTrue),
-                    Literal::False => builder.add_code(OpCode::LoadFalse),
-                    Literal::Nil => builder.add_code(OpCode::LoadNil),
+                    Literal::True => builder.code(OpCode::LoadTrue),
+                    Literal::False => builder.code(OpCode::LoadFalse),
+                    Literal::Nil => builder.code(OpCode::LoadNil),
                 };
             }
             Expression::Unary(u) => {
@@ -123,23 +117,27 @@ impl Compiler {
             Expression::Binary(b) => {
                 self.compile_expression(chunk, &b.left, str_pool)?;
                 self.compile_expression(chunk, &b.right, str_pool)?;
-                let mut builder = chunk.build_for(expr.get_line());
+                let mut builder = chunk.build_for(expr);
                 match b.op {
-                    Operator::Equal => builder.add_code(OpCode::Equal),
-                    Operator::NotEqual => builder.add_code(OpCode::Equal).add_code(OpCode::Not),
-                    Operator::Less => builder.add_code(OpCode::Less),
-                    Operator::LessEqual => builder.add_code(OpCode::Greater).add_code(OpCode::Not),
-                    Operator::Greater => builder.add_code(OpCode::Greater),
-                    Operator::GreaterEqual => builder.add_code(OpCode::Less).add_code(OpCode::Not),
-                    Operator::Add => builder.add_code(OpCode::Add),
-                    Operator::Subtract => builder.add_code(OpCode::Subtract),
-                    Operator::Multiply => builder.add_code(OpCode::Multiply),
-                    Operator::Divide => builder.add_code(OpCode::Divide),
+                    Operator::Equal => builder.code(OpCode::Equal),
+                    Operator::NotEqual => builder.code(OpCode::Equal).code(OpCode::Not),
+                    Operator::Less => builder.code(OpCode::Less),
+                    Operator::LessEqual => builder.code(OpCode::Greater).code(OpCode::Not),
+                    Operator::Greater => builder.code(OpCode::Greater),
+                    Operator::GreaterEqual => builder.code(OpCode::Less).code(OpCode::Not),
+                    Operator::Add => builder.code(OpCode::Add),
+                    Operator::Subtract => builder.code(OpCode::Subtract),
+                    Operator::Multiply => builder.code(OpCode::Multiply),
+                    Operator::Divide => builder.code(OpCode::Divide),
                 };
             }
             Expression::Grouping(g) => self.compile_expression(chunk, &g, str_pool)?,
             &Expression::Variable(v) => {
-                chunk.add_code(OpCode::LoadGlobalVar(str_pool.register(v)), expr.get_line());
+                chunk.add_code(OpCode::LoadVar(str_pool.register(v)), expr.get_line());
+            }
+            Expression::Assignment(a) => {
+                self.compile_expression(chunk, &a.expr, str_pool)?;
+                chunk.add_code(OpCode::SetVar(str_pool.register(&a.id)), expr.get_line());
             }
         }
         Ok(())
@@ -159,5 +157,13 @@ mod test {
         let str_pool = StrPool::new();
         let chunk = compiler.compile_program(&program, &str_pool).unwrap();
         chunk.print_chunk("test");
+    }
+
+    #[test]
+    fn test_str_pool() {
+        let str_pool = StrPool::new();
+        let s1 = str_pool.register("hello");
+        let s2 = str_pool.register("hello");
+        assert_eq!(s1, s2);
     }
 }
