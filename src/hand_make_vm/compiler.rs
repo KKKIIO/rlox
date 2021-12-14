@@ -72,7 +72,7 @@ impl Compiler {
                 }
                 chunk
                     .build_for(d)
-                    .code(OpCode::SetVar(str_pool.register(d.ast.name)))
+                    .code(OpCode::DefVar(str_pool.register(d.ast.name)))
                     .code(OpCode::Pop);
             }
             &DeclOrStmt::Stmt(ref stmt) => match &stmt.ast {

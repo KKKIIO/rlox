@@ -4,7 +4,7 @@ use nom::{
     character::complete::{digit1, none_of},
     combinator::{cut, map, opt, peek, recognize, value},
     error::context,
-    sequence::{terminated, tuple},
+    sequence::tuple,
     IResult,
 };
 use nom::{
@@ -32,7 +32,7 @@ pub enum Expression<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct Assignment<'a> {
-    pub id: Span<'a>,
+    pub id: &'a str,
     pub expr: Box<LocatedAst<Expression<'a>>>,
 }
 
@@ -52,20 +52,34 @@ pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 
 fn include_assignment(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, prefix) = opt(tuple((
-        identifier,
+    let (input, lhs) = opt(tuple((
+        include_equality,
         comment_whitespace0,
         tag("="),
         peek(none_of("=")),
     )))(input)?;
-    if let Some((id, _, _, _)) = prefix {
-        let (input, _) = comment_whitespace0(input)?;
-        let (input, expr) = cut(include_assignment)(input)?;
-        let expr = Expression::Assignment(Assignment {
-            id,
-            expr: Box::new(expr),
-        });
-        Ok((input, LocatedAst::new(pos, expr)))
+    if let Some((lvalue, _, eq, _)) = lhs {
+        if let LocatedAst {
+            ast: Expression::Variable(id),
+            ..
+        } = lvalue
+        {
+            let (input, _) = comment_whitespace0(input)?;
+            let (input, expr) = cut(include_assignment)(input)?;
+            let expr = Expression::Assignment(Assignment {
+                id,
+                expr: Box::new(expr),
+            });
+            Ok((input, LocatedAst::new(pos, expr)))
+        } else {
+            Err(nom::Err::Failure(GrammarError {
+                error_kind: GrammarErrorKind::Grammar {
+                    kind: "Invalid assignment target.",
+                    at: Some(eq),
+                },
+                input,
+            }))
+        }
     } else {
         include_equality(input)
     }
@@ -107,66 +121,142 @@ fn include_equality(input: Span) -> IResult<Span, LocatedAst<Expression>, Gramma
 
 fn include_comparison(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, left) = include_term(input)?;
-    let (input, op) = opt(alt((
-        map(tag("<="), |_| -> Operator { Operator::LessEqual }),
-        map(char('<'), |_| -> Operator { Operator::Less }),
-        map(tag(">="), |_| -> Operator { Operator::GreaterEqual }),
-        map(char('>'), |_| -> Operator { Operator::Greater }),
-    )))(input)?;
-    if let Some(op) = op {
-        let (input, _) = comment_whitespace0(input)?;
-        let (input, right) = cut(include_comparison)(input)?;
-        let branch = Expression::Binary(Binary {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        });
-        Ok((input, LocatedAst::new(pos, branch)))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = include_term(input)?;
+    loop {
+        let op: Option<Operator>;
+        (input, op) = opt(alt((
+            map(tag("<="), |_| -> Operator { Operator::LessEqual }),
+            map(char('<'), |_| -> Operator { Operator::Less }),
+            map(tag(">="), |_| -> Operator { Operator::GreaterEqual }),
+            map(char('>'), |_| -> Operator { Operator::Greater }),
+        )))(input)?;
+        if let Some(op) = op {
+            input = comment_whitespace0(input)?.0;
+            let right: LocatedAst<Expression>;
+            (input, right) = cut(include_term)(input)?;
+            left = LocatedAst::new(
+                pos.clone(),
+                Expression::Binary(Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }),
+            );
+        } else {
+            break Ok((input, left));
+        }
     }
+    // let (input, pos) = position(input)?;
+    // let (input, left) = include_term(input)?;
+    // let (input, op) = opt(alt((
+    //     map(tag("<="), |_| -> Operator { Operator::LessEqual }),
+    //     map(char('<'), |_| -> Operator { Operator::Less }),
+    //     map(tag(">="), |_| -> Operator { Operator::GreaterEqual }),
+    //     map(char('>'), |_| -> Operator { Operator::Greater }),
+    // )))(input)?;
+    // if let Some(op) = op {
+    //     let (input, _) = comment_whitespace0(input)?;
+    //     let (input, right) = cut(include_comparison)(input)?;
+    //     let branch = Expression::Binary(Binary {
+    //         left: Box::new(left),
+    //         op,
+    //         right: Box::new(right),
+    //     });
+    //     Ok((input, LocatedAst::new(pos, branch)))
+    // } else {
+    //     Ok((input, left))
+    // }
 }
 
 fn include_term(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, left) = include_factor(input)?;
-    let (input, op) = opt(alt((
-        map(char('+'), |_| -> Operator { Operator::Add }),
-        map(char('-'), |_| -> Operator { Operator::Subtract }),
-    )))(input)?;
-    if let Some(op) = op {
-        let (input, _) = comment_whitespace0(input)?;
-        let (input, right) = cut(include_term)(input)?;
-        let branch = Expression::Binary(Binary {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        });
-        Ok((input, LocatedAst::new(pos, branch)))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = include_factor(input)?;
+    loop {
+        let op: Option<Operator>;
+        (input, op) = opt(alt((
+            map(char('+'), |_| -> Operator { Operator::Add }),
+            map(char('-'), |_| -> Operator { Operator::Subtract }),
+        )))(input)?;
+        if let Some(op) = op {
+            input = comment_whitespace0(input)?.0;
+            let right: LocatedAst<Expression>;
+            (input, right) = cut(include_factor)(input)?;
+            left = LocatedAst::new(
+                pos.clone(),
+                Expression::Binary(Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }),
+            );
+        } else {
+            break Ok((input, left));
+        }
     }
+
+    // let (input, pos) = position(input)?;
+    // let (input, left) = include_factor(input)?;
+    // let (input, op) = opt(alt((
+    //     map(char('+'), |_| -> Operator { Operator::Add }),
+    //     map(char('-'), |_| -> Operator { Operator::Subtract }),
+    // )))(input)?;
+    // if let Some(op) = op {
+    //     let (input, _) = comment_whitespace0(input)?;
+    //     let (input, right) = cut(include_term)(input)?;
+    //     let branch = Expression::Binary(Binary {
+    //         left: Box::new(left),
+    //         op,
+    //         right: Box::new(right),
+    //     });
+    //     Ok((input, LocatedAst::new(pos, branch)))
+    // } else {
+    //     Ok((input, left))
+    // }
 }
 fn include_factor(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, left) = include_unary(input)?;
-    let (input, op) = opt(alt((
-        map(char('*'), |_| -> Operator { Operator::Multiply }),
-        map(char('/'), |_| -> Operator { Operator::Divide }),
-    )))(input)?;
-    if let Some(op) = op {
-        let (input, _) = comment_whitespace0(input)?;
-        let (input, right) = cut(include_factor)(input)?;
-        let branch = Expression::Binary(Binary {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        });
-        Ok((input, LocatedAst::new(pos, branch)))
-    } else {
-        Ok((input, left))
+    let (mut input, mut left) = include_unary(input)?;
+    loop {
+        let op: Option<Operator>;
+        (input, op) = opt(alt((
+            map(char('*'), |_| -> Operator { Operator::Multiply }),
+            map(char('/'), |_| -> Operator { Operator::Divide }),
+        )))(input)?;
+        if let Some(op) = op {
+            input = comment_whitespace0(input)?.0;
+            let right: LocatedAst<Expression>;
+            (input, right) = cut(include_unary)(input)?;
+            left = LocatedAst::new(
+                pos.clone(),
+                Expression::Binary(Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }),
+            );
+        } else {
+            break Ok((input, left));
+        }
     }
+
+    // let (input, pos) = position(input)?;
+    // let (input, left) = include_unary(input)?;
+    // let (input, op) = opt(alt((
+    //     map(char('*'), |_| -> Operator { Operator::Multiply }),
+    //     map(char('/'), |_| -> Operator { Operator::Divide }),
+    // )))(input)?;
+    // if let Some(op) = op {
+    //     let (input, _) = comment_whitespace0(input)?;
+    //     let (input, right) = cut(include_factor)(input)?;
+    //     let branch = Expression::Binary(Binary {
+    //         left: Box::new(left),
+    //         op,
+    //         right: Box::new(right),
+    //     });
+    //     Ok((input, LocatedAst::new(pos, branch)))
+    // } else {
+    //     Ok((input, left))
+    // }
 }
 
 fn include_unary(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
@@ -194,6 +284,7 @@ fn include_primary(input: Span) -> IResult<Span, LocatedAst<Expression>, Grammar
         map(literal, |l| Expression::Literal(l)),
         map(identifier, |v| Expression::Variable(v.fragment())),
     ))(input)?;
+    let (input, _) = comment_whitespace0(input)?;
     Ok((input, LocatedAst::new(pos, expr)))
 }
 
@@ -208,16 +299,13 @@ pub enum Literal {
 }
 
 fn literal(input: Span) -> IResult<Span, Literal, GrammarError<Span>> {
-    terminated(
-        alt((
-            map(number, |n| -> Literal { Literal::Number(n) }),
-            map(string, |s| -> Literal { Literal::String(s) }),
-            map(tag("true"), |_| -> Literal { Literal::True }),
-            map(tag("false"), |_| -> Literal { Literal::False }),
-            map(tag("nil"), |_| -> Literal { Literal::Nil }),
-        )),
-        comment_whitespace0,
-    )(input)
+    alt((
+        map(number, |n| -> Literal { Literal::Number(n) }),
+        map(string, |s| -> Literal { Literal::String(s) }),
+        map(tag("true"), |_| -> Literal { Literal::True }),
+        map(tag("false"), |_| -> Literal { Literal::False }),
+        map(tag("nil"), |_| -> Literal { Literal::Nil }),
+    ))(input)
 }
 
 fn number(input: Span) -> IResult<Span, f64, GrammarError<Span>> {
@@ -267,7 +355,6 @@ fn grouping(input: Span) -> IResult<Span, Box<LocatedAst<Expression>>, GrammarEr
     let (input, _) = comment_whitespace0(input)?;
     let (input, e) = context("group expression", cut(expression))(input)?;
     let (input, _) = char(')')(input)?;
-    let (input, _) = comment_whitespace0(input)?;
     Ok((input, Box::new(e)))
 }
 
@@ -361,6 +448,22 @@ mod test {
     }
 
     #[test]
+    fn test_term() {
+        let (_, res) = expression("a + b".into()).unwrap();
+        match res.ast {
+            Expression::Binary(Binary {
+                left,
+                op: Operator::Add,
+                right,
+            }) => {
+                assert_eq!(left.ast, Expression::Variable("a"));
+                assert_eq!(right.ast, Expression::Variable("b"));
+            }
+            _ => panic!("Expected binary expression, got {:?}", res.ast),
+        }
+    }
+
+    #[test]
     fn test_assigment() {
         let (_, res) = expression("a = b = 1".into()).unwrap();
         match res.ast {
@@ -377,8 +480,8 @@ mod test {
                         ..
                     },
             }) => {
-                assert_eq!(a.fragment(), &"a");
-                assert_eq!(b.fragment(), &"b");
+                assert_eq!(a, "a");
+                assert_eq!(b, "b");
                 assert_eq!(v, Expression::Literal(Literal::Number(1.0)));
             }
             _ => panic!("Expected assignment, got {:?}", res.ast),

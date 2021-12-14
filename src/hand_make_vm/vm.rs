@@ -21,6 +21,7 @@ where
     LoadConstStr(u8),
     LoadConstStrLong(u32),
     LoadVar(Str),
+    DefVar(Str),
     SetVar(Str),
     Equal,
     Less,
@@ -187,6 +188,14 @@ impl VM {
                     let s = &chunk.const_str_pool[usize::try_from(i).unwrap()];
                     stack.push(Value::String(s.clone()));
                 }
+                OpCode::DefVar(name) => {
+                    let value = stack.last().unwrap().clone();
+                    if let Some(v) = self.global_env.variables.get_mut(name.deref()) {
+                        *v = value;
+                    } else {
+                        self.global_env.variables.insert(name.to_string(), value);
+                    }
+                }
                 OpCode::LoadVar(name) => {
                     let v = self
                         .global_env
@@ -199,12 +208,15 @@ impl VM {
                     stack.push(v.clone());
                 }
                 OpCode::SetVar(name) => {
-                    let value = stack.last().unwrap().clone();
-                    if let Some(v) = self.global_env.variables.get_mut(name.deref()) {
-                        *v = value;
-                    } else {
-                        self.global_env.variables.insert(name.to_string(), value);
-                    }
+                    let v =
+                        self.global_env
+                            .variables
+                            .get_mut(name.deref())
+                            .ok_or(InterpreteError {
+                                message: format!("Undefined variable '{}'.", name.deref()),
+                                line: chunk.get_line(curr_ip),
+                            })?;
+                    *v = stack.last().unwrap().clone();
                 }
                 OpCode::Add => {
                     let b_idx = stack.len() - 1;

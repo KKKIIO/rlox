@@ -1,10 +1,7 @@
 use std::fmt::Display;
 
-use nom::{
-    error::{ContextError, ParseError},
-    IResult, Parser,
-};
-use nom_locate::{position, LocatedSpan};
+use nom::error::{ContextError, ParseError};
+use nom_locate::LocatedSpan;
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
