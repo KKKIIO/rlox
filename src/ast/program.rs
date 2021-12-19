@@ -6,7 +6,7 @@ use nom::{
 
 use super::{
     comment::comment_whitespace0,
-    parse::{GrammarError, Span},
+    parse::{GrammarError, LocatedAst, Span},
     statement::{decl_or_stmt, DeclOrStmt},
 };
 
@@ -15,7 +15,7 @@ program        → statement* EOF ;
  */
 #[derive(Debug, PartialEq)]
 pub struct Program<'a> {
-    pub statements: Vec<DeclOrStmt<'a>>,
+    pub statements: Vec<LocatedAst<DeclOrStmt<'a>>>,
 }
 
 pub fn program(input: Span) -> IResult<Span, Program, GrammarError<Span>> {

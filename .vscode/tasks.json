@@ -14,8 +14,7 @@
 			"label": "rust: cargo build",
 			"presentation": {
 				"reveal": "silent",
-				"clear": true,
-				"close": true
+				"clear": true
 			}
 		}
 	]

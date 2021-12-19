@@ -1,4 +1,3 @@
-use nom::character::complete::char;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -6,6 +5,7 @@ use nom::{
     sequence::{preceded, terminated, tuple},
     IResult,
 };
+use nom::{character::complete::char, multi::many0};
 
 use nom_locate::position;
 
@@ -18,14 +18,14 @@ use super::{
 
 #[derive(Debug, PartialEq)]
 pub enum DeclOrStmt<'a> {
-    Decl(LocatedAst<VarDecl<'a>>),
-    Stmt(LocatedAst<Statement<'a>>),
+    Decl(VarDecl<'a>),
+    Stmt(Statement<'a>),
 }
 
-pub fn decl_or_stmt(input: Span) -> IResult<Span, DeclOrStmt, GrammarError<Span>> {
+pub fn decl_or_stmt(input: Span) -> IResult<Span, LocatedAst<DeclOrStmt>, GrammarError<Span>> {
     alt((
-        map(var_decl, |d| DeclOrStmt::Decl(d)),
-        map(statement, |s| DeclOrStmt::Stmt(s)),
+        map(var_decl, |l| l.map(|d| DeclOrStmt::Decl(d))),
+        map(statement, |l| l.map(|s| DeclOrStmt::Stmt(s))),
     ))(input)
 }
 
@@ -63,14 +63,16 @@ pub fn var_decl(input: Span) -> IResult<Span, LocatedAst<VarDecl>, GrammarError<
 pub enum Statement<'a> {
     Expression(LocatedAst<Expression<'a>>),
     Print(LocatedAst<Expression<'a>>),
+    Block(Vec<LocatedAst<DeclOrStmt<'a>>>),
 }
 
-// statement      → exprStmt | printStmt ;
+// statement      → exprStmt | printStmt | block ;
 pub fn statement(input: Span) -> IResult<Span, LocatedAst<Statement>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, stmt) = alt((
         map(print_statement, |expr| Statement::Print(expr)),
         map(expr_statement, |expr| Statement::Expression(expr)),
+        map(block, |block| Statement::Block(block)),
     ))(input)?;
     Ok((input, LocatedAst::new(pos, stmt)))
 }
@@ -88,6 +90,16 @@ fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, Grammar
     let (input, _) = cut(tag(";"))(input)?;
     let (input, _) = comment_whitespace0(input)?;
     Ok((input, expression))
+}
+
+// block          → "{" declaration* "}" ;
+fn block(input: Span) -> IResult<Span, Vec<LocatedAst<DeclOrStmt>>, GrammarError<Span>> {
+    let (input, _) = tag("{")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, decls) = many0(decl_or_stmt)(input)?;
+    let (input, _) = tag("}")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    Ok((input, decls))
 }
 
 #[cfg(test)]

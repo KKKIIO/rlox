@@ -23,6 +23,13 @@ impl<T> LocatedAst<T> {
         self.line
     }
 
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> LocatedAst<R> {
+        LocatedAst {
+            ast: f(self.ast),
+            line: self.line,
+        }
+    }
+
     // pub fn include_pos<'a, F>(
     //     mut parser: F,
     // ) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>

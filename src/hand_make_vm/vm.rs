@@ -20,9 +20,11 @@ where
     LoadNumber(f64),
     LoadConstStr(u8),
     LoadConstStrLong(u32),
-    LoadVar(Str),
-    DefVar(Str),
-    SetVar(Str),
+    LoadGlobalVar(Str),
+    DefGlobalVar(Str),
+    SetGlobalVar(Str),
+    LoadLocalVar(u8),
+    SetLobalVar(u8),
     Equal,
     Less,
     Greater,
@@ -33,7 +35,7 @@ where
     Not,
     Negate,
     Print,
-    Pop,
+    Pop(u8),
     // Return,
 }
 
@@ -188,15 +190,15 @@ impl VM {
                     let s = &chunk.const_str_pool[usize::try_from(i).unwrap()];
                     stack.push(Value::String(s.clone()));
                 }
-                OpCode::DefVar(name) => {
-                    let value = stack.last().unwrap().clone();
+                OpCode::DefGlobalVar(name) => {
+                    let value = stack.pop().unwrap();
                     if let Some(v) = self.global_env.variables.get_mut(name.deref()) {
                         *v = value;
                     } else {
                         self.global_env.variables.insert(name.to_string(), value);
                     }
                 }
-                OpCode::LoadVar(name) => {
+                OpCode::LoadGlobalVar(name) => {
                     let v = self
                         .global_env
                         .variables
@@ -207,7 +209,7 @@ impl VM {
                         })?;
                     stack.push(v.clone());
                 }
-                OpCode::SetVar(name) => {
+                OpCode::SetGlobalVar(name) => {
                     let v =
                         self.global_env
                             .variables
@@ -217,6 +219,22 @@ impl VM {
                                 line: chunk.get_line(curr_ip),
                             })?;
                     *v = stack.last().unwrap().clone();
+                }
+                &OpCode::LoadLocalVar(i) => {
+                    let v = stack
+                        .get(i as usize)
+                        .expect(
+                            format!(
+                                "Local variable index out of bounds, i={}, stack={:?}",
+                                i, stack
+                            )
+                            .as_str(),
+                        )
+                        .clone();
+                    stack.push(v);
+                }
+                &OpCode::SetLobalVar(i) => {
+                    stack[i as usize] = stack.pop().unwrap();
                 }
                 OpCode::Add => {
                     let b_idx = stack.len() - 1;
@@ -293,8 +311,16 @@ impl VM {
                     let v = stack.pop().unwrap();
                     stack.push(Value::Bool(Self::is_falsey(&v)));
                 }
-                OpCode::Pop => {
-                    stack.pop().unwrap();
+                &OpCode::Pop(count) => {
+                    let rest = stack.len().checked_sub(count.into()).expect(
+                        format!(
+                            "stack underflow, stack.len={}, pop.count={}",
+                            stack.len(),
+                            count
+                        )
+                        .as_str(),
+                    );
+                    stack.truncate(rest);
                 }
             };
         }
