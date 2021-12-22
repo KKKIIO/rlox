@@ -49,7 +49,7 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>>
     }
 }
 
-fn is_alpha_numeric(c: char) -> bool {
+pub fn is_alpha_numeric(c: char) -> bool {
     is_alpha(c) || c.is_ascii_digit()
 }
 fn is_alpha(c: char) -> bool {

@@ -12,6 +12,7 @@ num-derive = "0.2"
 nom_locate = "4"
 gpoint = "0.2.1"
 phf = { version = "0.10.0", features = ["macros"] }
+clap = "2"
 # inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = [
 #     "llvm10-0",
 # ] }

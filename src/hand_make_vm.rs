@@ -23,4 +23,9 @@ impl HandMakeVM {
         let mut chunk = CompileRun::compile(program, &self.pool)?;
         self.vm.run(&mut chunk)
     }
+
+    pub fn show_compile(&mut self, program: &Program) -> Result<(), InterpreteError> {
+        CompileRun::compile(program, &self.pool)?.print_chunk();
+        Ok(())
+    }
 }

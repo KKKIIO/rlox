@@ -1,23 +1,20 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{digit1, none_of},
-    combinator::{cut, map, opt, peek, recognize, value},
+    character::complete::none_of,
+    combinator::{cut, map, opt, peek},
     error::context,
     sequence::tuple,
     IResult,
 };
-use nom::{
-    bytes::complete::{escaped_transform, is_not},
-    character::complete::char,
-    sequence::preceded,
-};
+use nom::{character::complete::char, sequence::preceded};
 use nom_locate::position;
 
 use super::{
     comment::comment_whitespace0,
     identifier::identifier,
     parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
+    primary::{literal, Literal},
 };
 
 #[derive(Debug, PartialEq)]
@@ -288,60 +285,6 @@ fn include_primary(input: Span) -> IResult<Span, LocatedAst<Expression>, Grammar
     Ok((input, LocatedAst::new(pos, expr)))
 }
 
-// literal        → NUMBER | STRING | "true" | "false" | "nil" ;
-#[derive(Debug, PartialEq)]
-pub enum Literal {
-    Number(f64),
-    String(String),
-    True,
-    False,
-    Nil,
-}
-
-fn literal(input: Span) -> IResult<Span, Literal, GrammarError<Span>> {
-    alt((
-        map(number, |n| -> Literal { Literal::Number(n) }),
-        map(string, |s| -> Literal { Literal::String(s) }),
-        map(tag("true"), |_| -> Literal { Literal::True }),
-        map(tag("false"), |_| -> Literal { Literal::False }),
-        map(tag("nil"), |_| -> Literal { Literal::Nil }),
-    ))(input)
-}
-
-fn number(input: Span) -> IResult<Span, f64, GrammarError<Span>> {
-    map(
-        recognize(tuple((digit1, opt(tuple((char('.'), digit1)))))),
-        |s: Span| s.fragment().parse::<f64>().unwrap(),
-    )(input)
-}
-
-fn string(input: Span) -> IResult<Span, String, GrammarError<Span>> {
-    let (input, _) = char('"')(input)?;
-    let (input, s) = opt(escaped_transform(
-        is_not("\\\"\n"),
-        '\\',
-        alt((
-            value("\\", tag("\\")),
-            value("\"", tag("\"")),
-            value("\n", tag("n")),
-        )),
-    ))(input)?;
-    let (input, _) = char::<Span, nom::error::Error<Span>>('"')(input).map_err(|e| {
-        nom::Err::Failure(GrammarError {
-            input: match e {
-                nom::Err::Error(e) => e.input,
-                nom::Err::Failure(e) => e.input,
-                nom::Err::Incomplete(_) => unreachable!(),
-            },
-            error_kind: GrammarErrorKind::Grammar {
-                kind: "Unterminated string.",
-                at: None,
-            },
-        })
-    })?;
-    Ok((input, s.unwrap_or("".to_string())))
-}
-
 // unary          → ( "-" | "!" ) expression ;
 #[derive(Debug, PartialEq)]
 pub enum Unary<'a> {
@@ -378,41 +321,6 @@ mod test {
     use std::error::Error;
 
     use super::*;
-    #[test]
-    fn test_string() {
-        let (_, res) = string("\"hello\"".into()).unwrap();
-        assert_eq!(res, "hello");
-        let (_, res) = string("\"\"".into()).unwrap();
-        assert_eq!(res, "");
-        let (_, res) = string("\"\\\\\"".into()).unwrap();
-        assert_eq!(res, "\\");
-        let err = match string("\"this string has no close quote".into()).unwrap_err() {
-            nom::Err::Failure(e) => e,
-            _ => panic!("Expected failure"),
-        };
-        assert_eq!(
-            err.error_kind,
-            GrammarErrorKind::Grammar {
-                kind: "Unterminated string.",
-                at: None,
-            },
-        );
-    }
-
-    #[test]
-    fn test_literal() -> Result<(), Box<dyn Error>> {
-        let (_, res) = literal("1".into())?;
-        assert_eq!(res, Literal::Number(1.0));
-        let (_, res) = literal("\"hello\"".into())?;
-        assert_eq!(res, Literal::String("hello".to_string()));
-        let (_, res) = literal("true".into())?;
-        assert_eq!(res, Literal::True);
-        let (_, res) = literal("false".into())?;
-        assert_eq!(res, Literal::False);
-        let (_, res) = literal("nil".into())?;
-        assert_eq!(res, Literal::Nil);
-        Ok(())
-    }
 
     #[test]
     fn test_unary() {

@@ -96,8 +96,7 @@ where
         self.lines[ip]
     }
 
-    pub fn print_chunk(&self, name: &str) {
-        println!("== {} ==", name);
+    pub fn print_chunk(&self) {
         for (i, code) in self.codes.iter().enumerate() {
             let line = if i > 0 && self.lines[i] == self.lines[i - 1] {
                 "   |".to_string()
@@ -220,13 +219,13 @@ impl VM {
                             })?;
                     *v = stack.last().unwrap().clone();
                 }
-                &OpCode::LoadLocalVar(i) => {
+                &OpCode::LoadLocalVar(local_idx) => {
                     let v = stack
-                        .get(i as usize)
+                        .get(local_idx as usize)
                         .expect(
                             format!(
-                                "Local variable index out of bounds, i={}, stack={:?}",
-                                i, stack
+                                "Local variable index out of bounds, ip={}, i={}, stack={:?}",
+                                ip, local_idx, stack
                             )
                             .as_str(),
                         )
@@ -234,7 +233,7 @@ impl VM {
                     stack.push(v);
                 }
                 &OpCode::SetLobalVar(i) => {
-                    stack[i as usize] = stack.pop().unwrap();
+                    stack[i as usize] = stack.last().unwrap().clone();
                 }
                 OpCode::Add => {
                     let b_idx = stack.len() - 1;

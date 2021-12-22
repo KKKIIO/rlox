@@ -9,6 +9,7 @@ pub mod comment;
 pub mod expression;
 pub mod identifier;
 pub mod parse;
+pub mod primary;
 pub mod program;
 pub mod statement;
 

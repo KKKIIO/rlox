@@ -1,12 +1,12 @@
 #![feature(destructuring_assignment)]
 #![feature(box_patterns)]
 use std::{
-    env::args,
     fs::File,
     io::{self, Read, Write},
     process::exit,
 };
 
+use clap::{App, Arg};
 use hand_make_vm::HandMakeVM;
 
 use crate::ast::parse_source;
@@ -14,20 +14,28 @@ use crate::ast::parse_source;
 mod ast;
 mod hand_make_vm;
 fn main() {
-    let args = args().skip(1).collect::<Vec<_>>();
-    if args.len() > 1 {
-        eprintln!("Usage: rlox [script]");
-        exit(64);
-    }
-    let filepath = args.get(0);
+    let matches = App::new("rlox")
+        .arg(Arg::with_name("script").help("Script file path").index(1))
+        .arg(
+            Arg::with_name("show-compile")
+                .short("s")
+                .long("show-compile")
+                .help("Show compile result"),
+        )
+        .get_matches();
+    let show_compile = matches.is_present("show-compile");
     let mut vm = HandMakeVM::new();
-    if let Some(fp) = filepath {
+    if let Some(fp) = matches.value_of("script") {
         let mut f = File::open(fp).unwrap();
         let mut buf = String::new();
         f.read_to_string(&mut buf).unwrap();
         match parse_source(buf.as_str().into()) {
             Ok(program) => {
-                if let Err(err) = vm.run(&program) {
+                if let Err(err) = if show_compile {
+                    vm.show_compile(&program)
+                } else {
+                    vm.run(&program)
+                } {
                     eprintln!("{}\n[line {}]", err.message, err.line);
                     exit(70);
                 }

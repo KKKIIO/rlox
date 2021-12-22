@@ -1,7 +1,9 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
+    character::complete::anychar,
     combinator::{cut, map, opt},
+    error::ParseError,
     sequence::{preceded, terminated, tuple},
     IResult,
 };
@@ -12,8 +14,8 @@ use nom_locate::position;
 use super::{
     comment::{comment_whitespace0, comment_whitespace1},
     expression::{expression, Expression},
-    identifier::identifier,
-    parse::{GrammarError, LocatedAst, Span},
+    identifier::{identifier, is_alpha_numeric},
+    parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
 };
 
 #[derive(Debug, PartialEq)]
@@ -85,8 +87,24 @@ fn expr_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 // printStmt      → "print" expression ";" ;
 fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, _) = tag("print")(input)?;
-    let (input, _) = comment_whitespace1(input)?;
-    let (input, expression) = cut(expression)(input)?;
+    let (_, c) = anychar(input)?;
+    if is_alpha_numeric(c) {
+        return Err(nom::Err::Error(GrammarError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, expression) = cut(expression)(input).map_err(|e| {
+        nom::Err::Failure(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Grammar {
+                kind: "Expect expression.",
+                // TODO: next token?
+                at: None,
+            },
+        })
+    })?;
     let (input, _) = cut(tag(";"))(input)?;
     let (input, _) = comment_whitespace0(input)?;
     Ok((input, expression))
@@ -107,7 +125,7 @@ mod test {
     use std::error::Error;
 
     use super::*;
-    use crate::ast::expression::{Expression, Literal};
+    use crate::ast::{expression::Expression, primary::Literal};
 
     #[test]
     fn test_var_decl() {
@@ -119,9 +137,11 @@ mod test {
 
     #[test]
     fn test_print_statement() {
-        let (_, res) = print_statement("print \"Hello, world!\"; // Hello, world!".into()).unwrap();
-        let expected = Expression::Literal(Literal::String("Hello, world!".to_string()));
-        assert_eq!(res.ast, expected);
+        let (_, res) = print_statement("print\"Hello, world!\"; // Hello, world!".into()).unwrap();
+        assert_eq!(
+            res.ast,
+            Expression::Literal(Literal::String("Hello, world!".to_string()))
+        );
         print_statement("print1".into()).unwrap_err();
     }
 

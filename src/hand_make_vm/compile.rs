@@ -1,8 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::ast::{
-    expression::{Expression, Literal, Operator, Unary},
+    expression::{Expression, Operator, Unary},
     parse::LocatedAst,
+    primary::Literal,
     program::Program,
     statement::{DeclOrStmt, Statement},
 };
@@ -224,7 +225,7 @@ mod test {
         let program = parse_source("print 1;".into()).unwrap();
         let str_pool = StrPool::new();
         let chunk = CompileRun::compile(&program, &str_pool).unwrap();
-        chunk.print_chunk("test");
+        chunk.print_chunk();
     }
 
     #[test]
