@@ -98,12 +98,12 @@ impl<'a> CompileRun<'a> {
             scopes: Scopes::new(),
         };
         for stmt in program.statements.iter() {
-            run.compile_statement(&stmt)?;
+            run.compile_decl_or_stmt(&stmt)?;
         }
         Ok(run.chunk)
     }
 
-    pub fn compile_statement(
+    pub fn compile_decl_or_stmt(
         &mut self,
         ds: &LocatedAst<DeclOrStmt<'_>>,
     ) -> Result<(), InterpreteError> {
@@ -127,24 +127,49 @@ impl<'a> CompileRun<'a> {
                         .code(OpCode::DefGlobalVar(self.str_pool.register(d.name)));
                 }
             }
-            DeclOrStmt::Stmt(ref stmt) => match &stmt {
-                Statement::Expression(expr) => {
-                    self.compile_expression(expr)?;
-                    self.chunk.add_code(OpCode::Pop(1), ds.get_line());
+            DeclOrStmt::Stmt(ref stmt) => {
+                self.compile_stmt(stmt, ds.get_line())?;
+            }
+        };
+        Ok(())
+    }
+
+    pub fn compile_stmt(&mut self, stmt: &Statement<'_>, line: u32) -> Result<(), InterpreteError> {
+        match stmt {
+            Statement::Expr(expr) => {
+                self.compile_expression(expr)?;
+                self.chunk.add_code(OpCode::Pop(1), line);
+            }
+            Statement::Print(expr) => {
+                self.compile_expression(expr)?;
+                self.chunk.add_code(OpCode::Print, line);
+            }
+            Statement::Block(statements) => {
+                self.scopes.enter_scope();
+                for stmt in statements.iter() {
+                    self.compile_decl_or_stmt(&stmt)?;
                 }
-                Statement::Print(expr) => {
-                    self.compile_expression(expr)?;
-                    self.chunk.add_code(OpCode::Print, ds.get_line());
+                let var_count = self.scopes.leave_scope();
+                self.chunk.add_code(OpCode::Pop(var_count), line)
+            }
+            Statement::If(stmt) => {
+                self.compile_expression(&stmt.cond)?;
+                let jf_i = self.chunk.get_next_index();
+                self.chunk.add_code(OpCode::JumpIfFalse(u16::MAX), line);
+                self.compile_stmt(&stmt.then_branch.ast, stmt.then_branch.get_line())?;
+                if let Some(box ref else_branch) = stmt.else_branch {
+                    let jmp_i = self.chunk.get_next_index();
+                    self.chunk.add_code(OpCode::Jump(u16::MAX), line);
+                    let else_i = self.chunk.get_next_index();
+                    self.chunk.set(jf_i, OpCode::JumpIfFalse(else_i));
+                    self.compile_stmt(&else_branch.ast, else_branch.get_line())?;
+                    let end_i = self.chunk.get_next_index();
+                    self.chunk.set(jmp_i, OpCode::Jump(end_i));
+                } else {
+                    let end_i = self.chunk.get_next_index();
+                    self.chunk.set(jf_i, OpCode::JumpIfFalse(end_i));
                 }
-                Statement::Block(statements) => {
-                    self.scopes.enter_scope();
-                    for stmt in statements.iter() {
-                        self.compile_statement(&stmt)?;
-                    }
-                    let var_count = self.scopes.leave_scope();
-                    self.chunk.build_for(ds).code(OpCode::Pop(var_count));
-                }
-            },
+            }
         };
         Ok(())
     }

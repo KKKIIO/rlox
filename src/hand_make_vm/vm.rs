@@ -36,6 +36,8 @@ where
     Negate,
     Print,
     Pop(u8),
+    Jump(u16),
+    JumpIfFalse(u16),
     // Return,
 }
 
@@ -92,6 +94,14 @@ where
         self.lines.push(line);
     }
 
+    pub fn get_next_index(&mut self) -> u16 {
+        self.codes.len() as u16
+    }
+
+    pub fn set(&mut self, i: u16, code: OpCode<Str>) {
+        self.codes[i as usize] = code;
+    }
+
     pub fn get_line(&self, ip: usize) -> u32 {
         self.lines[ip]
     }
@@ -124,7 +134,6 @@ where
         self.chunk.add_code(code, self.line);
         self
     }
-
     pub fn add_const_str(&mut self, str: String) -> &mut Self {
         let ref mut chunk = self.chunk;
         let idx = chunk.const_str_pool.len();
@@ -224,8 +233,8 @@ impl VM {
                         .get(local_idx as usize)
                         .expect(
                             format!(
-                                "Local variable index out of bounds, ip={}, i={}, stack={:?}",
-                                ip, local_idx, stack
+                                "Local variable index out of bounds, curr_ip={}, i={}, stack={:?}",
+                                curr_ip, local_idx, stack
                             )
                             .as_str(),
                         )
@@ -320,6 +329,17 @@ impl VM {
                         .as_str(),
                     );
                     stack.truncate(rest);
+                }
+                &OpCode::Jump(target_ip) => {
+                    ip = target_ip as usize;
+                    continue;
+                }
+                &OpCode::JumpIfFalse(target_ip) => {
+                    let v = stack.pop().unwrap();
+                    if Self::is_falsey(&v) {
+                        ip = target_ip as usize;
+                        continue;
+                    }
                 }
             };
         }

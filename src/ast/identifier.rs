@@ -40,6 +40,29 @@ pub fn identifier(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
     }
 }
 
+// pub fn verify<I: Clone, O1, O2, E: ParseError<I>, F, G>(
+//   mut first: F,
+//   second: G,
+// )
+pub fn consume_keyword<'a>(
+    keyword: &'static str,
+) -> impl FnMut(Span) -> IResult<Span, (), GrammarError<Span>> {
+    move |input| {
+        let (consumed_input, word) = identifier_or_keyword(input)?;
+        if keyword == *word.fragment() {
+            Ok((consumed_input, ()))
+        } else {
+            Err(nom::Err::Error(GrammarError {
+                input,
+                error_kind: GrammarErrorKind::Grammar {
+                    kind: "Expect variable name.",
+                    at: Some(word),
+                },
+            }))
+        }
+    }
+}
+
 fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
     let (_, c) = anychar(input)?;
     if !is_alpha(c) {

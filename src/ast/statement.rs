@@ -1,9 +1,7 @@
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::anychar,
     combinator::{cut, map, opt},
-    error::ParseError,
     sequence::{preceded, terminated, tuple},
     IResult,
 };
@@ -12,9 +10,9 @@ use nom::{character::complete::char, multi::many0};
 use nom_locate::position;
 
 use super::{
-    comment::{comment_whitespace0, comment_whitespace1},
+    comment::comment_whitespace0,
     expression::{expression, Expression},
-    identifier::{identifier, is_alpha_numeric},
+    identifier::{consume_keyword, identifier},
     parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
 };
 
@@ -40,8 +38,8 @@ pub struct VarDecl<'a> {
 
 pub fn var_decl(input: Span) -> IResult<Span, LocatedAst<VarDecl>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
-    let (input, _) = tag("var")(input)?;
-    let (input, _) = comment_whitespace1(input)?;
+    let (input, _) = consume_keyword("var")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
     let (input, name) = cut(identifier)(input)?;
     let (input, init_expr) = opt(preceded(
         tuple((comment_whitespace0, tag("="), comment_whitespace0)),
@@ -63,20 +61,53 @@ pub fn var_decl(input: Span) -> IResult<Span, LocatedAst<VarDecl>, GrammarError<
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
-    Expression(LocatedAst<Expression<'a>>),
+    Expr(LocatedAst<Expression<'a>>),
+    If(IfStmt<'a>),
     Print(LocatedAst<Expression<'a>>),
     Block(Vec<LocatedAst<DeclOrStmt<'a>>>),
 }
 
-// statement      → exprStmt | printStmt | block ;
+// statement      → exprStmt | ifStmt | printStmt | block ;
 pub fn statement(input: Span) -> IResult<Span, LocatedAst<Statement>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, stmt) = alt((
+        map(expr_statement, |expr| Statement::Expr(expr)),
+        map(if_stmt, |stmt| Statement::If(stmt)),
         map(print_statement, |expr| Statement::Print(expr)),
-        map(expr_statement, |expr| Statement::Expression(expr)),
         map(block, |block| Statement::Block(block)),
     ))(input)?;
     Ok((input, LocatedAst::new(pos, stmt)))
+}
+
+#[derive(Debug, PartialEq)]
+pub struct IfStmt<'a> {
+    pub cond: LocatedAst<Expression<'a>>,
+    pub then_branch: Box<LocatedAst<Statement<'a>>>,
+    pub else_branch: Option<Box<LocatedAst<Statement<'a>>>>,
+}
+
+// ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
+fn if_stmt(input: Span) -> IResult<Span, IfStmt, GrammarError<Span>> {
+    let (input, _) = consume_keyword("if")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, _) = tag("(")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, cond) = cut(expression)(input)?;
+    let (input, _) = tag(")")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, then_branch) = cut(statement)(input)?;
+    let (input, else_branch) = opt(preceded(
+        tuple((consume_keyword("else"), comment_whitespace0)),
+        cut(statement),
+    ))(input)?;
+    Ok((
+        input,
+        IfStmt {
+            cond,
+            then_branch: Box::new(then_branch),
+            else_branch: else_branch.map(|b| Box::new(b)),
+        },
+    ))
 }
 
 // exprStmt       → expression ";" ;
@@ -86,16 +117,9 @@ fn expr_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 
 // printStmt      → "print" expression ";" ;
 fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
-    let (input, _) = tag("print")(input)?;
-    let (_, c) = anychar(input)?;
-    if is_alpha_numeric(c) {
-        return Err(nom::Err::Error(GrammarError::from_error_kind(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
+    let (input, _) = consume_keyword("print")(input)?;
     let (input, _) = comment_whitespace0(input)?;
-    let (input, expression) = cut(expression)(input).map_err(|e| {
+    let (input, expression) = cut(expression)(input).map_err(|_| {
         nom::Err::Failure(GrammarError {
             input,
             error_kind: GrammarErrorKind::Grammar {
