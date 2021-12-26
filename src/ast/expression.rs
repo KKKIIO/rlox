@@ -5,14 +5,14 @@ use nom::{
     combinator::{cut, map, opt, peek},
     error::context,
     sequence::tuple,
-    IResult,
+    IResult, InputTake,
 };
 use nom::{character::complete::char, sequence::preceded};
 use nom_locate::position;
 
 use super::{
     comment::comment_whitespace0,
-    identifier::identifier,
+    identifier::{identifier, identifier_or_keyword, is_alpha},
     parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
     primary::{literal, Literal},
 };
@@ -44,7 +44,31 @@ pub struct Assignment<'a> {
 /// Factor|	/ *	|Left
 /// Unary|	! -	|Right
 pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
-    include_assignment(input)
+    include_assignment(input).map_err(|e| match e {
+        nom::Err::Error(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Nom(_),
+        }) => nom::Err::Error(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Grammar {
+                kind: "Expect expression.",
+                // just to pass the lox author's tests
+                at: next_token(input),
+            },
+        }),
+        nom::Err::Failure(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Nom(_),
+        }) => nom::Err::Failure(GrammarError {
+            input,
+            error_kind: GrammarErrorKind::Grammar {
+                kind: "Expect expression.",
+                // just to pass the lox author's tests
+                at: next_token(input),
+            },
+        }),
+        _ => e,
+    })
 }
 
 fn include_assignment(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
@@ -316,6 +340,18 @@ pub enum Operator {
     Divide,
 }
 
+fn next_token(input: Span) -> Option<Span> {
+    if let [c, ..] = input.fragment().as_bytes() {
+        Some(if is_alpha((*c).into()) {
+            identifier_or_keyword(input).unwrap().1
+        } else {
+            input.take(1)
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::error::Error;
@@ -420,5 +456,23 @@ mod test {
             }
             _ => panic!("Expected binary expression, got {:?}", res.ast),
         }
+    }
+
+    #[test]
+    fn test_error_at() {
+        let e = match expression(".123".into()).unwrap_err() {
+            nom::Err::Error(e) => e,
+            nom::Err::Failure(e) => e,
+            _ => panic!("Expected error"),
+        };
+        match e {
+            GrammarError {
+                error_kind: GrammarErrorKind::Grammar { at: Some(at), .. },
+                ..
+            } => {
+                assert_eq!(*at.fragment(), ".");
+            }
+            _ => panic!("Expected error"),
+        };
     }
 }

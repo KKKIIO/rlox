@@ -4,7 +4,7 @@ use nom::{
     character::complete::{line_ending, multispace1, not_line_ending},
     combinator::{cut, opt, recognize},
     error::{ContextError, ParseError},
-    multi::{many0, many1},
+    multi::many0,
     sequence::tuple,
     IResult,
 };

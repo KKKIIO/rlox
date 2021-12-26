@@ -77,6 +77,16 @@ impl<I> ParseError<I> for GrammarError<I> {
     fn append(_: I, _: nom::error::ErrorKind, other: Self) -> Self {
         other
     }
+
+    fn or(self, other: Self) -> Self {
+        if let GrammarErrorKind::Grammar { .. } = &self.error_kind {
+            self
+        } else if let GrammarErrorKind::Grammar { .. } = &other.error_kind {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 impl<I> ContextError<I> for GrammarError<I> {}

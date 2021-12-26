@@ -63,7 +63,7 @@ pub fn consume_keyword<'a>(
     }
 }
 
-fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
+pub fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
     let (_, c) = anychar(input)?;
     if !is_alpha(c) {
         Err(nom::Err::Error(GrammarError::from_char(input, c)))
@@ -75,6 +75,7 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, Span, GrammarError<Span>>
 pub fn is_alpha_numeric(c: char) -> bool {
     is_alpha(c) || c.is_ascii_digit()
 }
-fn is_alpha(c: char) -> bool {
+
+pub fn is_alpha(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }

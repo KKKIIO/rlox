@@ -13,7 +13,7 @@ use super::{
     comment::comment_whitespace0,
     expression::{expression, Expression},
     identifier::{consume_keyword, identifier},
-    parse::{GrammarError, GrammarErrorKind, LocatedAst, Span},
+    parse::{GrammarError, LocatedAst, Span},
 };
 
 #[derive(Debug, PartialEq)]
@@ -119,16 +119,7 @@ fn expr_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, _) = consume_keyword("print")(input)?;
     let (input, _) = comment_whitespace0(input)?;
-    let (input, expression) = cut(expression)(input).map_err(|_| {
-        nom::Err::Failure(GrammarError {
-            input,
-            error_kind: GrammarErrorKind::Grammar {
-                kind: "Expect expression.",
-                // TODO: next token?
-                at: None,
-            },
-        })
-    })?;
+    let (input, expression) = cut(expression)(input)?;
     let (input, _) = cut(tag(";"))(input)?;
     let (input, _) = comment_whitespace0(input)?;
     Ok((input, expression))
