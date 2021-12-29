@@ -1,4 +1,5 @@
-use std::{cell::RefCell, rc::Rc};
+use core::fmt::Debug;
+use std::{cell::RefCell, ops::Deref, rc::Rc};
 
 use crate::ast::{
     expression::{Expression, Operator, Unary},
@@ -10,7 +11,7 @@ use crate::ast::{
 
 use super::{
     error::InterpreteError,
-    vm::{Chunk, OpCode},
+    vm::{Chunk, JumpIfParam, OpCode},
 };
 
 pub struct StrPool {
@@ -150,24 +151,22 @@ impl<'a> CompileRun<'a> {
                     self.compile_decl_or_stmt(&stmt)?;
                 }
                 let var_count = self.scopes.leave_scope();
-                self.chunk.add_code(OpCode::Pop(var_count), line)
+                self.chunk.add_code(OpCode::Pop(var_count), line);
             }
             Statement::If(stmt) => {
                 self.compile_expression(&stmt.cond)?;
-                let jf_i = self.chunk.get_next_index();
-                self.chunk.add_code(OpCode::JumpIfFalse(u16::MAX), line);
+                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
                 self.compile_stmt(&stmt.then_branch.ast, stmt.then_branch.get_line())?;
                 if let Some(box ref else_branch) = stmt.else_branch {
-                    let jmp_i = self.chunk.get_next_index();
-                    self.chunk.add_code(OpCode::Jump(u16::MAX), line);
+                    let jmp = JumpPlaceholder::new(&mut self.chunk, line);
                     let else_i = self.chunk.get_next_index();
-                    self.chunk.set(jf_i, OpCode::JumpIfFalse(else_i));
+                    jif.set_target(&mut self.chunk, else_i);
                     self.compile_stmt(&else_branch.ast, else_branch.get_line())?;
-                    let end_i = self.chunk.get_next_index();
-                    self.chunk.set(jmp_i, OpCode::Jump(end_i));
+                    let res_i = self.chunk.get_next_index();
+                    jmp.set_target(&mut self.chunk, res_i);
                 } else {
-                    let end_i = self.chunk.get_next_index();
-                    self.chunk.set(jf_i, OpCode::JumpIfFalse(end_i));
+                    let res_i = self.chunk.get_next_index();
+                    jif.set_target(&mut self.chunk, res_i);
                 }
             }
         };
@@ -199,19 +198,76 @@ impl<'a> CompileRun<'a> {
             }
             Expression::Binary(b) => {
                 self.compile_expression(&b.left)?;
-                self.compile_expression(&b.right)?;
-                let mut builder = self.chunk.build_for(expr);
                 match b.op {
-                    Operator::Equal => builder.code(OpCode::Equal),
-                    Operator::NotEqual => builder.code(OpCode::Equal).code(OpCode::Not),
-                    Operator::Less => builder.code(OpCode::Less),
-                    Operator::LessEqual => builder.code(OpCode::Greater).code(OpCode::Not),
-                    Operator::Greater => builder.code(OpCode::Greater),
-                    Operator::GreaterEqual => builder.code(OpCode::Less).code(OpCode::Not),
-                    Operator::Add => builder.code(OpCode::Add),
-                    Operator::Subtract => builder.code(OpCode::Subtract),
-                    Operator::Multiply => builder.code(OpCode::Multiply),
-                    Operator::Divide => builder.code(OpCode::Divide),
+                    Operator::LogicAnd => {
+                        let jif =
+                            JumpIfFalsePlaceholder::new(&mut self.chunk, false, expr.get_line());
+                        self.compile_expression(&b.right)?;
+                        let jres = JumpPlaceholder::new(&mut self.chunk, expr.get_line());
+                        let res_i = self.chunk.get_next_index();
+                        jif.set_target(&mut self.chunk, res_i);
+                        jres.set_target(&mut self.chunk, res_i);
+                    }
+                    Operator::LogicOr => {
+                        let jif =
+                            JumpIfFalsePlaceholder::new(&mut self.chunk, false, expr.get_line());
+                        let jres = JumpPlaceholder::new(&mut self.chunk, expr.get_line());
+                        let rhs_i = self.chunk.get_next_index();
+                        jif.set_target(&mut self.chunk, rhs_i);
+                        self.compile_expression(&b.right)?;
+                        let res_i = self.chunk.get_next_index();
+                        jres.set_target(&mut self.chunk, res_i);
+                    }
+                    Operator::Equal => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Equal);
+                    }
+                    Operator::NotEqual => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Equal).code(OpCode::Not);
+                    }
+                    Operator::Less => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Less);
+                    }
+                    Operator::LessEqual => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Greater).code(OpCode::Not);
+                    }
+                    Operator::Greater => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Greater);
+                    }
+                    Operator::GreaterEqual => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Less).code(OpCode::Not);
+                    }
+                    Operator::Add => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Add);
+                    }
+                    Operator::Subtract => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Subtract);
+                    }
+                    Operator::Multiply => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Multiply);
+                    }
+                    Operator::Divide => {
+                        self.compile_expression(&b.right)?;
+                        let mut builder = self.chunk.build_for(expr);
+                        builder.code(OpCode::Divide);
+                    }
                 };
             }
             Expression::Grouping(g) => self.compile_expression(&g)?,
@@ -259,5 +315,60 @@ mod test {
         let s1 = str_pool.register("hello");
         let s2 = str_pool.register("hello");
         assert_eq!(s1, s2);
+    }
+}
+
+struct JumpPlaceholder {
+    jump_i: u16,
+}
+
+impl JumpPlaceholder {
+    fn new<Str>(chunk: &mut Chunk<Str>, src_line: u32) -> Self
+    where
+        Str: Deref<Target = str> + Debug,
+    {
+        let jump_i = chunk.get_next_index();
+        chunk.add_code(OpCode::Jump(u16::MAX), src_line);
+        Self { jump_i }
+    }
+    fn set_target<Str>(&self, chunk: &mut Chunk<Str>, target_i: u16)
+    where
+        Str: Deref<Target = str> + Debug,
+    {
+        chunk.set(self.jump_i, OpCode::Jump(target_i));
+    }
+}
+
+struct JumpIfFalsePlaceholder {
+    jump_i: u16,
+    pop_value: bool,
+}
+
+impl JumpIfFalsePlaceholder {
+    fn new<Str>(chunk: &mut Chunk<Str>, pop_value: bool, src_line: u32) -> Self
+    where
+        Str: Deref<Target = str> + Debug,
+    {
+        let jump_i = chunk.get_next_index();
+        chunk.add_code(
+            OpCode::JumpIfFalse(JumpIfParam {
+                pop_value,
+                target: u16::MAX,
+            }),
+            src_line,
+        );
+        Self { jump_i, pop_value }
+    }
+    fn set_target<Str>(&self, chunk: &mut Chunk<Str>, target: u16)
+    where
+        Str: Deref<Target = str> + Debug,
+    {
+        chunk.set(
+            self.jump_i,
+            OpCode::JumpIfFalse(JumpIfParam {
+                pop_value: self.pop_value,
+                target,
+            }),
+        );
     }
 }

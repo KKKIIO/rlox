@@ -5,7 +5,7 @@ use nom::{
     combinator::{cut, map, opt, peek},
     error::context,
     sequence::tuple,
-    IResult, InputTake,
+    IResult, InputTake, Parser,
 };
 use nom::{character::complete::char, sequence::preceded};
 use nom_locate::position;
@@ -45,10 +45,7 @@ pub struct Assignment<'a> {
 /// Unary|	! -	|Right
 pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     include_assignment(input).map_err(|e| match e {
-        nom::Err::Error(GrammarError {
-            input,
-            error_kind: GrammarErrorKind::Nom(_),
-        }) => nom::Err::Error(GrammarError {
+        nom::Err::Error(GrammarError { input, .. }) => nom::Err::Error(GrammarError {
             input,
             error_kind: GrammarErrorKind::Grammar {
                 kind: "Expect expression.",
@@ -74,7 +71,7 @@ pub fn expression(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarE
 fn include_assignment(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     let (input, pos) = position(input)?;
     let (input, lhs) = opt(tuple((
-        include_equality,
+        include_logic_or,
         comment_whitespace0,
         tag("="),
         peek(none_of("=")),
@@ -102,7 +99,7 @@ fn include_assignment(input: Span) -> IResult<Span, LocatedAst<Expression>, Gram
             }))
         }
     } else {
-        include_equality(input)
+        include_logic_or(input)
     }
 }
 
@@ -111,6 +108,53 @@ pub struct Binary<'a> {
     pub left: Box<LocatedAst<Expression<'a>>>,
     pub op: Operator,
     pub right: Box<LocatedAst<Expression<'a>>>,
+}
+
+fn include_logic_or(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
+    include_left_assoicate_binary(
+        map(tag("or"), |_| -> Operator { Operator::LogicOr }),
+        include_logic_and,
+    )(input)
+}
+fn include_logic_and(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
+    include_left_assoicate_binary(
+        map(tag("and"), |_| -> Operator { Operator::LogicAnd }),
+        include_equality,
+    )(input)
+}
+
+fn include_left_assoicate_binary<'a, OpF, SubF>(
+    opf: OpF,
+    mut subf: SubF,
+) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<Expression<'a>>, GrammarError<Span<'a>>>
+where
+    OpF: Parser<Span<'a>, Operator, GrammarError<Span<'a>>>,
+    SubF: Parser<Span<'a>, LocatedAst<Expression<'a>>, GrammarError<Span<'a>>> + Copy,
+{
+    let mut opf = opt(opf);
+    move |input: Span| {
+        let (input, pos) = position(input)?;
+        let (mut input, mut left) = subf.parse(input)?;
+        loop {
+            let op: Option<Operator>;
+            (input, op) = opf(input)?;
+            if let Some(op) = op {
+                input = comment_whitespace0(input)?.0;
+                let right: LocatedAst<Expression>;
+                (input, right) = cut(subf)(input)?;
+                left = LocatedAst::new(
+                    pos.clone(),
+                    Expression::Binary(Binary {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                    }),
+                );
+            } else {
+                break Ok((input, left));
+            }
+        }
+    }
 }
 
 fn include_equality(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
@@ -338,6 +382,8 @@ pub enum Operator {
     Subtract,
     Multiply,
     Divide,
+    LogicAnd,
+    LogicOr,
 }
 
 fn next_token(input: Span) -> Option<Span> {

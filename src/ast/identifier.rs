@@ -40,10 +40,6 @@ pub fn identifier(input: Span) -> IResult<Span, Span, GrammarError<Span>> {
     }
 }
 
-// pub fn verify<I: Clone, O1, O2, E: ParseError<I>, F, G>(
-//   mut first: F,
-//   second: G,
-// )
 pub fn consume_keyword<'a>(
     keyword: &'static str,
 ) -> impl FnMut(Span) -> IResult<Span, (), GrammarError<Span>> {
@@ -55,7 +51,7 @@ pub fn consume_keyword<'a>(
             Err(nom::Err::Error(GrammarError {
                 input,
                 error_kind: GrammarErrorKind::Grammar {
-                    kind: "Expect variable name.",
+                    kind: "Expect keyword.",
                     at: Some(word),
                 },
             }))

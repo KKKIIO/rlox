@@ -1,6 +1,6 @@
 use core::fmt::Debug;
-use std::collections::HashMap;
 use std::fmt::Display;
+use std::{collections::HashMap, convert::TryInto};
 use std::{convert::TryFrom, ops::Deref};
 
 use gpoint::GPoint;
@@ -37,8 +37,14 @@ where
     Print,
     Pop(u8),
     Jump(u16),
-    JumpIfFalse(u16),
+    JumpIfFalse(JumpIfParam),
     // Return,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct JumpIfParam {
+    pub target: u16,
+    pub pop_value: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -88,10 +94,12 @@ where
         }
     }
 
-    pub fn add_code(&mut self, code: OpCode<Str>, line: u32) {
+    pub fn add_code(&mut self, code: OpCode<Str>, line: u32) -> u16 {
         assert_eq!(self.codes.len(), self.lines.len());
+        let i = self.codes.len().try_into().unwrap();
         self.codes.push(code);
         self.lines.push(line);
+        i
     }
 
     pub fn get_next_index(&mut self) -> u16 {
@@ -334,10 +342,13 @@ impl VM {
                     ip = target_ip as usize;
                     continue;
                 }
-                &OpCode::JumpIfFalse(target_ip) => {
-                    let v = stack.pop().unwrap();
-                    if Self::is_falsey(&v) {
-                        ip = target_ip as usize;
+                &OpCode::JumpIfFalse(JumpIfParam { target, pop_value }) => {
+                    let falsey = Self::is_falsey(&stack.last().unwrap());
+                    if pop_value {
+                        stack.pop();
+                    }
+                    if falsey {
+                        ip = target as usize;
                         continue;
                     }
                 }
