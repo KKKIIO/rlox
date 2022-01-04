@@ -169,6 +169,16 @@ impl<'a> CompileRun<'a> {
                     jif.set_target(&mut self.chunk, res_i);
                 }
             }
+            Statement::While(stmt) => {
+                let start_i = self.chunk.get_next_index();
+                self.compile_expression(&stmt.cond)?;
+                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
+                self.compile_stmt(&stmt.body.ast, stmt.body.get_line())?;
+                let jmp = JumpPlaceholder::new(&mut self.chunk, line);
+                jmp.set_target(&mut self.chunk, start_i);
+                let res_i = self.chunk.get_next_index();
+                jif.set_target(&mut self.chunk, res_i);
+            }
         };
         Ok(())
     }

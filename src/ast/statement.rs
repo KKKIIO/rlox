@@ -64,6 +64,7 @@ pub enum Statement<'a> {
     Expr(LocatedAst<Expression<'a>>),
     If(IfStmt<'a>),
     Print(LocatedAst<Expression<'a>>),
+    While(WhileStmt<'a>),
     Block(Vec<LocatedAst<DeclOrStmt<'a>>>),
 }
 
@@ -74,6 +75,7 @@ pub fn statement(input: Span) -> IResult<Span, LocatedAst<Statement>, GrammarErr
         map(expr_statement, |expr| Statement::Expr(expr)),
         map(if_stmt, |stmt| Statement::If(stmt)),
         map(print_statement, |expr| Statement::Print(expr)),
+        map(while_stmt, |stmt| Statement::While(stmt)),
         map(block, |block| Statement::Block(block)),
     ))(input)?;
     Ok((input, LocatedAst::new(pos, stmt)))
@@ -123,6 +125,31 @@ fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, Grammar
     let (input, _) = cut(tag(";"))(input)?;
     let (input, _) = comment_whitespace0(input)?;
     Ok((input, expression))
+}
+
+#[derive(Debug, PartialEq)]
+pub struct WhileStmt<'a> {
+    pub cond: Box<LocatedAst<Expression<'a>>>,
+    pub body: Box<LocatedAst<Statement<'a>>>,
+}
+
+// whileStmt      → "while" "(" expression ")" statement ;
+fn while_stmt(input: Span) -> IResult<Span, WhileStmt, GrammarError<Span>> {
+    let (input, _) = consume_keyword("while")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, _) = tag("(")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, cond) = cut(expression)(input)?;
+    let (input, _) = tag(")")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, body) = cut(statement)(input)?;
+    Ok((
+        input,
+        WhileStmt {
+            cond: cond.into(),
+            body: body.into(),
+        },
+    ))
 }
 
 // block          → "{" declaration* "}" ;
