@@ -7,25 +7,23 @@ use nom::{
 };
 use nom::{character::complete::char, multi::many0};
 
-use nom_locate::position;
-
 use super::{
     comment::comment_whitespace0,
     expression::{expression, Expression},
     identifier::{consume_keyword, identifier},
-    parse::{GrammarError, LocatedAst, Span},
+    parse::{include_pos, GrammarError, LocatedAst, Span},
 };
 
 #[derive(Debug, PartialEq)]
 pub enum DeclOrStmt<'a> {
-    Decl(VarDecl<'a>),
+    Decl(LocatedAst<VarDecl<'a>>),
     Stmt(Statement<'a>),
 }
 
-pub fn decl_or_stmt(input: Span) -> IResult<Span, LocatedAst<DeclOrStmt>, GrammarError<Span>> {
+pub fn decl_or_stmt(input: Span) -> IResult<Span, DeclOrStmt, GrammarError<Span>> {
     alt((
-        map(var_decl, |l| l.map(|d| DeclOrStmt::Decl(d))),
-        map(statement, |l| l.map(|s| DeclOrStmt::Stmt(s))),
+        map(include_pos(var_decl), |d| DeclOrStmt::Decl(d)),
+        map(statement, |s| DeclOrStmt::Stmt(s)),
     ))(input)
 }
 
@@ -36,8 +34,7 @@ pub struct VarDecl<'a> {
     pub init_expr: Option<LocatedAst<Expression<'a>>>,
 }
 
-pub fn var_decl(input: Span) -> IResult<Span, LocatedAst<VarDecl>, GrammarError<Span>> {
-    let (input, pos) = position(input)?;
+pub fn var_decl(input: Span) -> IResult<Span, VarDecl, GrammarError<Span>> {
     let (input, _) = consume_keyword("var")(input)?;
     let (input, _) = comment_whitespace0(input)?;
     let (input, name) = cut(identifier)(input)?;
@@ -49,43 +46,40 @@ pub fn var_decl(input: Span) -> IResult<Span, LocatedAst<VarDecl>, GrammarError<
     let (input, _) = comment_whitespace0(input)?;
     Ok((
         input,
-        LocatedAst::new(
-            pos,
-            VarDecl {
-                name: name.fragment(),
-                init_expr,
-            },
-        ),
+        VarDecl {
+            name: name.fragment(),
+            init_expr,
+        },
     ))
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Statement<'a> {
     Expr(LocatedAst<Expression<'a>>),
-    If(IfStmt<'a>),
+    For(LocatedAst<ForStmt<'a>>),
+    If(LocatedAst<IfStmt<'a>>),
     Print(LocatedAst<Expression<'a>>),
-    While(WhileStmt<'a>),
-    Block(Vec<LocatedAst<DeclOrStmt<'a>>>),
+    While(LocatedAst<WhileStmt<'a>>),
+    Block(LocatedAst<Vec<DeclOrStmt<'a>>>),
 }
 
-// statement      → exprStmt | ifStmt | printStmt | block ;
-pub fn statement(input: Span) -> IResult<Span, LocatedAst<Statement>, GrammarError<Span>> {
-    let (input, pos) = position(input)?;
+pub fn statement(input: Span) -> IResult<Span, Statement, GrammarError<Span>> {
     let (input, stmt) = alt((
         map(expr_statement, |expr| Statement::Expr(expr)),
-        map(if_stmt, |stmt| Statement::If(stmt)),
+        map(include_pos(for_stmt), |stmt| Statement::For(stmt)),
+        map(include_pos(if_stmt), |stmt| Statement::If(stmt)),
         map(print_statement, |expr| Statement::Print(expr)),
-        map(while_stmt, |stmt| Statement::While(stmt)),
-        map(block, |block| Statement::Block(block)),
+        map(include_pos(while_stmt), |stmt| Statement::While(stmt)),
+        map(include_pos(block), |block| Statement::Block(block)),
     ))(input)?;
-    Ok((input, LocatedAst::new(pos, stmt)))
+    Ok((input, stmt))
 }
 
 #[derive(Debug, PartialEq)]
 pub struct IfStmt<'a> {
     pub cond: LocatedAst<Expression<'a>>,
-    pub then_branch: Box<LocatedAst<Statement<'a>>>,
-    pub else_branch: Option<Box<LocatedAst<Statement<'a>>>>,
+    pub then_branch: Box<Statement<'a>>,
+    pub else_branch: Option<Box<Statement<'a>>>,
 }
 
 // ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
@@ -116,6 +110,45 @@ fn if_stmt(input: Span) -> IResult<Span, IfStmt, GrammarError<Span>> {
 fn expr_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
     terminated(expression, tuple((char(';'), comment_whitespace0)))(input)
 }
+#[derive(Debug, PartialEq)]
+pub struct ForStmt<'a> {
+    pub init: Option<Box<DeclOrStmt<'a>>>,
+    pub cond: Option<Box<LocatedAst<Expression<'a>>>>,
+    pub post: Option<Box<LocatedAst<Expression<'a>>>>,
+    pub body: Box<Statement<'a>>,
+}
+// forStmt        → "for" "(" ( varDecl | exprStmt | ";" ) expression? ";" expression? ")" statement ;
+fn for_stmt(input: Span) -> IResult<Span, ForStmt, GrammarError<Span>> {
+    let (input, _) = consume_keyword("for")(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, _) = cut(tag("("))(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, init) = alt((
+        map(include_pos(var_decl), |d| Some(DeclOrStmt::Decl(d))),
+        map(expr_statement, |e| {
+            Some(DeclOrStmt::Stmt(Statement::Expr(e)))
+        }),
+        map(tag(";"), |_| None),
+    ))(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, cond) = opt(expression)(input)?;
+    let (input, _) = cut(tag(";"))(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, post) = opt(expression)(input)?;
+    let (input, _) = cut(tag(")"))(input)?;
+    let (input, _) = comment_whitespace0(input)?;
+    let (input, body) = cut(statement)(input)?;
+
+    Ok((
+        input,
+        ForStmt {
+            init: init.map(|d| Box::new(d)),
+            cond: cond.map(|e| Box::new(e)),
+            post: post.map(|e| Box::new(e)),
+            body: body.into(),
+        },
+    ))
+}
 
 // printStmt      → "print" expression ";" ;
 fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, GrammarError<Span>> {
@@ -130,7 +163,7 @@ fn print_statement(input: Span) -> IResult<Span, LocatedAst<Expression>, Grammar
 #[derive(Debug, PartialEq)]
 pub struct WhileStmt<'a> {
     pub cond: Box<LocatedAst<Expression<'a>>>,
-    pub body: Box<LocatedAst<Statement<'a>>>,
+    pub body: Box<Statement<'a>>,
 }
 
 // whileStmt      → "while" "(" expression ")" statement ;
@@ -146,14 +179,14 @@ fn while_stmt(input: Span) -> IResult<Span, WhileStmt, GrammarError<Span>> {
     Ok((
         input,
         WhileStmt {
-            cond: cond.into(),
-            body: body.into(),
+            cond: Box::new(cond),
+            body: Box::new(body),
         },
     ))
 }
 
 // block          → "{" declaration* "}" ;
-fn block(input: Span) -> IResult<Span, Vec<LocatedAst<DeclOrStmt>>, GrammarError<Span>> {
+fn block(input: Span) -> IResult<Span, Vec<DeclOrStmt>, GrammarError<Span>> {
     let (input, _) = tag("{")(input)?;
     let (input, _) = comment_whitespace0(input)?;
     let (input, decls) = many0(decl_or_stmt)(input)?;
@@ -171,7 +204,7 @@ mod test {
 
     #[test]
     fn test_var_decl() {
-        let (_, LocatedAst { ast: token, .. }) = var_decl(Span::new("var x = 1;")).unwrap();
+        let (_, token) = var_decl(Span::new("var x = 1;")).unwrap();
         assert_eq!(token.name, "x");
         let LocatedAst { ast: init_expr, .. } = token.init_expr.unwrap();
         assert_eq!(init_expr, Expression::Literal(Literal::Number(1.0)));

@@ -1,14 +1,17 @@
 use std::fmt::Display;
 
-use nom::error::{ContextError, ParseError};
-use nom_locate::LocatedSpan;
+use nom::{
+    error::{ContextError, ParseError},
+    IResult, Parser,
+};
+use nom_locate::{position, LocatedSpan};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
 #[derive(Debug, PartialEq)]
 pub struct LocatedAst<T> {
     pub ast: T,
-    line: u32,
+    pub line: u32,
 }
 
 impl<T> LocatedAst<T> {
@@ -18,36 +21,25 @@ impl<T> LocatedAst<T> {
             line: pos.location_line(),
         }
     }
+}
 
-    pub fn get_line(&self) -> u32 {
-        self.line
+pub fn include_pos<'a, T, F>(
+    mut parser: F,
+) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>
+where
+    F: Parser<Span<'a>, T, GrammarError<Span<'a>>>,
+{
+    move |input: Span| {
+        let (input, pos) = position(input)?;
+        let (input, ast) = parser.parse(input)?;
+        Ok((
+            input,
+            LocatedAst {
+                ast,
+                line: pos.location_line(),
+            },
+        ))
     }
-
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> LocatedAst<R> {
-        LocatedAst {
-            ast: f(self.ast),
-            line: self.line,
-        }
-    }
-
-    // pub fn include_pos<'a, F>(
-    //     mut parser: F,
-    // ) -> impl FnMut(Span<'a>) -> IResult<Span<'a>, LocatedAst<T>, GrammarError<Span<'a>>>
-    // where
-    //     F: Parser<Span<'a>, T, GrammarError<Span<'a>>>,
-    // {
-    //     move |input: Span| {
-    //         let (input, pos) = position(input)?;
-    //         let (input, ast) = parser.parse(input)?;
-    //         Ok((
-    //             input,
-    //             Self {
-    //                 ast,
-    //                 line: pos.location_line(),
-    //             },
-    //         ))
-    //     }
-    // }
 }
 
 #[derive(Debug, PartialEq)]

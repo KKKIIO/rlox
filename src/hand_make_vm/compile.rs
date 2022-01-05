@@ -6,7 +6,7 @@ use crate::ast::{
     parse::LocatedAst,
     primary::Literal,
     program::Program,
-    statement::{DeclOrStmt, Statement},
+    statement::{DeclOrStmt, Statement, VarDecl},
 };
 
 use super::{
@@ -104,64 +104,75 @@ impl<'a> CompileRun<'a> {
         Ok(run.chunk)
     }
 
-    pub fn compile_decl_or_stmt(
-        &mut self,
-        ds: &LocatedAst<DeclOrStmt<'_>>,
-    ) -> Result<(), InterpreteError> {
-        match ds.ast {
-            DeclOrStmt::Decl(ref d) => {
-                if let Some(init_expr) = &d.init_expr {
-                    self.compile_expression(init_expr)?;
-                } else {
-                    self.chunk.build_for(ds).code(OpCode::LoadNil);
-                }
-                if !self.scopes.is_empty() {
-                    self.scopes
-                        .new_var(self.str_pool.register(&d.name))
-                        .map_err(|e| InterpreteError {
-                            message: e.to_string(),
-                            line: ds.get_line(),
-                        })?;
-                } else {
-                    self.chunk
-                        .build_for(ds)
-                        .code(OpCode::DefGlobalVar(self.str_pool.register(d.name)));
-                }
+    fn compile_decl_or_stmt(&mut self, ds: &DeclOrStmt<'_>) -> Result<(), InterpreteError> {
+        match ds {
+            DeclOrStmt::Decl(l) => {
+                self.compile_var_decl(l)?;
             }
             DeclOrStmt::Stmt(ref stmt) => {
-                self.compile_stmt(stmt, ds.get_line())?;
+                self.compile_stmt(stmt)?;
             }
         };
         Ok(())
     }
 
-    pub fn compile_stmt(&mut self, stmt: &Statement<'_>, line: u32) -> Result<(), InterpreteError> {
+    fn compile_var_decl(&mut self, l: &LocatedAst<VarDecl<'_>>) -> Result<(), InterpreteError> {
+        let line = l.line;
+        let var_decl = &l.ast;
+        if let Some(init_expr) = &var_decl.init_expr {
+            self.compile_expression(init_expr)?;
+        } else {
+            self.chunk.add_code(OpCode::LoadNil, line);
+        }
+        if !self.scopes.is_empty() {
+            self.scopes
+                .new_var(self.str_pool.register(&l.ast.name))
+                .map_err(|e| InterpreteError {
+                    message: e.to_string(),
+                    line,
+                })?;
+        } else {
+            self.chunk.add_code(
+                OpCode::DefGlobalVar(self.str_pool.register(l.ast.name)),
+                line,
+            );
+        };
+        Ok(())
+    }
+
+    fn compile_stmt(&mut self, stmt: &Statement<'_>) -> Result<(), InterpreteError> {
         match stmt {
             Statement::Expr(expr) => {
                 self.compile_expression(expr)?;
-                self.chunk.add_code(OpCode::Pop(1), line);
+                self.chunk.add_code(OpCode::Pop(1), {
+                    let ref this = expr;
+                    this.line
+                });
             }
             Statement::Print(expr) => {
                 self.compile_expression(expr)?;
-                self.chunk.add_code(OpCode::Print, line);
+                self.chunk.add_code(OpCode::Print, {
+                    let ref this = expr;
+                    this.line
+                });
             }
-            Statement::Block(statements) => {
+            Statement::Block(LocatedAst { ast, line }) => {
                 self.scopes.enter_scope();
-                for stmt in statements.iter() {
+                for stmt in ast.iter() {
                     self.compile_decl_or_stmt(&stmt)?;
                 }
                 let var_count = self.scopes.leave_scope();
-                self.chunk.add_code(OpCode::Pop(var_count), line);
+                self.chunk.add_code(OpCode::Pop(var_count), *line);
             }
-            Statement::If(stmt) => {
+            Statement::If(LocatedAst { ast: stmt, line }) => {
                 self.compile_expression(&stmt.cond)?;
-                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
-                self.compile_stmt(&stmt.then_branch.ast, stmt.then_branch.get_line())?;
+                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, *line);
+                self.compile_stmt(&stmt.then_branch)?;
                 if let Some(box ref else_branch) = stmt.else_branch {
-                    let jmp = JumpPlaceholder::new(&mut self.chunk, line);
+                    let jmp = JumpPlaceholder::new(&mut self.chunk, *line);
                     let else_i = self.chunk.get_next_index();
                     jif.set_target(&mut self.chunk, else_i);
-                    self.compile_stmt(&else_branch.ast, else_branch.get_line())?;
+                    self.compile_stmt(&else_branch)?;
                     let res_i = self.chunk.get_next_index();
                     jmp.set_target(&mut self.chunk, res_i);
                 } else {
@@ -169,15 +180,52 @@ impl<'a> CompileRun<'a> {
                     jif.set_target(&mut self.chunk, res_i);
                 }
             }
-            Statement::While(stmt) => {
+            Statement::While(LocatedAst { ast: stmt, line }) => {
                 let start_i = self.chunk.get_next_index();
                 self.compile_expression(&stmt.cond)?;
-                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
-                self.compile_stmt(&stmt.body.ast, stmt.body.get_line())?;
-                let jmp = JumpPlaceholder::new(&mut self.chunk, line);
+                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, *line);
+                self.compile_stmt(&stmt.body)?;
+                let jmp = JumpPlaceholder::new(&mut self.chunk, *line);
                 jmp.set_target(&mut self.chunk, start_i);
                 let res_i = self.chunk.get_next_index();
                 jif.set_target(&mut self.chunk, res_i);
+            }
+            Statement::For(LocatedAst { ast, line }) => {
+                self.scopes.enter_scope();
+                if let Some(box ref init) = ast.init {
+                    match init {
+                        DeclOrStmt::Decl(l) => {
+                            self.compile_var_decl(l)?;
+                        }
+                        DeclOrStmt::Stmt(Statement::Expr(l)) => {
+                            self.compile_expression(l)?;
+                        }
+                        _ => panic!("for init is not decl or expr, but {:?}", init),
+                    }
+                }
+                let start_i = self.chunk.get_next_index();
+                let jif = if let Some(box ref cond) = ast.cond {
+                    self.compile_expression(cond)?;
+                    Some(JumpIfFalsePlaceholder::new(
+                        &mut self.chunk,
+                        true,
+                        cond.line,
+                    ))
+                } else {
+                    None
+                };
+                self.compile_stmt(&ast.body)?;
+                if let Some(post) = &ast.post {
+                    self.compile_expression(post)?;
+                    self.chunk.add_code(OpCode::Pop(1), post.line);
+                }
+                JumpPlaceholder::new(&mut self.chunk, *line).set_target(&mut self.chunk, start_i);
+                if let Some(jif) = jif {
+                    let res_i = self.chunk.get_next_index();
+                    jif.set_target(&mut self.chunk, res_i);
+                }
+                let var_cnt = self.scopes.leave_scope();
+                self.chunk.add_code(OpCode::Pop(var_cnt), *line);
             }
         };
         Ok(())
@@ -204,24 +252,37 @@ impl<'a> CompileRun<'a> {
                     Unary::Not(n) => (OpCode::Not, n),
                 };
                 self.compile_expression(u_expr)?;
-                self.chunk.add_code(op_code, expr.get_line());
+                self.chunk.add_code(op_code, {
+                    let ref this = expr;
+                    this.line
+                });
             }
             Expression::Binary(b) => {
                 self.compile_expression(&b.left)?;
                 match b.op {
                     Operator::LogicAnd => {
-                        let jif =
-                            JumpIfFalsePlaceholder::new(&mut self.chunk, false, expr.get_line());
+                        let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, false, {
+                            let ref this = expr;
+                            this.line
+                        });
                         self.compile_expression(&b.right)?;
-                        let jres = JumpPlaceholder::new(&mut self.chunk, expr.get_line());
+                        let jres = JumpPlaceholder::new(&mut self.chunk, {
+                            let ref this = expr;
+                            this.line
+                        });
                         let res_i = self.chunk.get_next_index();
                         jif.set_target(&mut self.chunk, res_i);
                         jres.set_target(&mut self.chunk, res_i);
                     }
                     Operator::LogicOr => {
-                        let jif =
-                            JumpIfFalsePlaceholder::new(&mut self.chunk, false, expr.get_line());
-                        let jres = JumpPlaceholder::new(&mut self.chunk, expr.get_line());
+                        let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, false, {
+                            let ref this = expr;
+                            this.line
+                        });
+                        let jres = JumpPlaceholder::new(&mut self.chunk, {
+                            let ref this = expr;
+                            this.line
+                        });
                         let rhs_i = self.chunk.get_next_index();
                         jif.set_target(&mut self.chunk, rhs_i);
                         self.compile_expression(&b.right)?;

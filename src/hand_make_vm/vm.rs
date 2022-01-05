@@ -90,7 +90,7 @@ where
     pub fn build_for<'c, T>(&'c mut self, ast: &LocatedAst<T>) -> ChunkBuilder<'c, Str> {
         ChunkBuilder {
             chunk: self,
-            line: ast.get_line(),
+            line: ast.line,
         }
     }
 
