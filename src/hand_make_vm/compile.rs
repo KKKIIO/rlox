@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::{cell::RefCell, ops::Deref, rc::Rc};
+use std::{cell::RefCell, convert::TryInto, ops::Deref, rc::Rc};
 
 use crate::ast::{
     expression::{Expression, LiteralValue},
@@ -342,6 +342,16 @@ impl<'a> CompileRun<'a> {
                         a.op_line,
                     );
                 }
+            }
+            Expression::Call(c) => {
+                self.compile_expression(&c.callee)?;
+                for ele in c.args.iter() {
+                    self.compile_expression(ele)?;
+                }
+                self.chunk.add_code(
+                    OpCode::Call(c.args.len().try_into().unwrap()),
+                    c.left_paren_line,
+                );
             }
         }
         Ok(())

@@ -1,10 +1,11 @@
 use core::result::Result;
+use std::vec;
 
 use crate::ast::expression::Literal;
 
 use super::{
     error::GrammarError,
-    expression::{Assignment, Binary, Expression, LiteralValue, Unary, Variable},
+    expression::{Assignment, Binary, Call, Expression, LiteralValue, Unary, Variable},
     statement::{
         BlockStmt, DeclOrStmt, ExprStmt, ForStmt, IfStmt, PrintStmt, Program, Statement, VarDecl,
         WhileStmt,
@@ -408,47 +409,55 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        self.primary()
+        self.call()
     }
 
-    //   fn finishCall(&mut self,callee:Expr )->Result<Expression,GrammarError<'a>>  {
-    //     List<Expr> arguments = new ArrayList<>();
-    //     if (!check(RIGHT_PAREN)) {
-    //       do {
-    //
-    //         if (arguments.size() >= 255) {
-    //           error(peek(), "Can't have more than 255 arguments.");
-    //         }
-    //
-    //         arguments.add(expression());
-    //       } while (self.match_t(COMMA));
-    //     }
+    fn finish_call(&mut self, callee: Expression<'a>) -> Result<Expression<'a>, GrammarError<'a>> {
+        let mut args = vec![];
+        if !self.check(TokenType::RightParen) {
+            loop {
+                if args.len() >= 255 {
+                    self.errs.push(GrammarError::at_token(
+                        "Can't have more than 255 arguments.",
+                        self.peek(),
+                    ));
+                }
 
-    //     Token paren = consume(RIGHT_PAREN,
-    //                           "Expect ')' after arguments.");
+                args.push(self.expression()?);
+                if !self.match_t(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
 
-    //     return new Expr.Call(callee, paren, arguments);
-    //   }
+        let paren = self.consume(TokenType::RightParen, "Expect ')' after arguments.")?;
 
-    //   fn call(&mut self)->Result<Expression,GrammarError<'a>>  {
-    //     Expr expr = primary();
+        Ok(Expression::Call(Call {
+            callee: callee.into(),
+            left_paren_line: paren.line,
+            args,
+        }))
+    }
 
-    //     while (true) { // [while-true]
-    //       if (self.match_t(LEFT_PAREN)) {
-    //         expr = finishCall(expr);
-    //
-    //       } else if (self.match_t(DOT)) {
-    //         Token name = consume(IDENTIFIER,
-    //             "Expect property name after '.'.");
-    //         expr = new Expr.Get(expr, name);
-    //
-    //       } else {
-    //         break;
-    //       }
-    //     }
+    fn call(&mut self) -> Result<Expression<'a>, GrammarError<'a>> {
+        let mut expr = self.primary()?;
 
-    //     return expr;
-    //   }
+        loop {
+            if self.match_t(TokenType::LeftParen) {
+                expr = self.finish_call(expr)?;
+            }
+            //    else if (self.match_t(TokenType::Dot)) {
+            //     let name = self.consume(TokenType::Identifier,
+            //         "Expect property name after '.'.")?;
+            //     expr = new Expr.Get(expr, name);
+
+            //   }
+            else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
 
     fn primary(&mut self) -> Result<Expression<'a>, GrammarError<'a>> {
         let line = self.peek().line;

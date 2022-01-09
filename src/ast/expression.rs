@@ -23,6 +23,7 @@ pub enum Expression<'a> {
     Binary(Binary<'a>),
     Grouping(Box<Expression<'a>>),
     Variable(Variable<'a>),
+    Call(Call<'a>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -50,4 +51,11 @@ pub struct Unary<'a> {
     pub op: TokenType,
     pub op_line: u32,
     pub right: Box<Expression<'a>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Call<'a> {
+    pub callee: Box<Expression<'a>>,
+    pub left_paren_line: u32,
+    pub args: Vec<Expression<'a>>,
 }

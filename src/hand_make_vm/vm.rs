@@ -36,6 +36,7 @@ where
     Pop(u8),
     Jump(u16),
     JumpIfFalse(JumpIfParam),
+    Call(u8),
     // Return,
 }
 
@@ -51,6 +52,37 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     String(String),
+    NativeFunc(&'static NativeFun),
+}
+
+#[derive(Clone, Copy)]
+pub struct NativeFun {
+    pub name: &'static str,
+    pub fun: fn(Vec<Value>) -> Result<Value, InterpreteError>,
+}
+impl Debug for NativeFun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<NativeFun {}>", self.name)
+    }
+}
+impl PartialEq for NativeFun {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+const NATIVE_FUN_TIME: NativeFun = NativeFun {
+    name: "time",
+    fun: native_fun_time,
+};
+
+fn native_fun_time(_args: Vec<Value>) -> Result<Value, InterpreteError> {
+    Ok(Value::Number(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64(),
+    ))
 }
 
 impl Display for Value {
@@ -60,6 +92,7 @@ impl Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Number(n) => write!(f, "{}", GPoint(*n)),
             Value::String(s) => write!(f, "{}", s),
+            Value::NativeFunc(nf) => write!(f, "{:?}", nf),
         }
     }
 }
@@ -142,10 +175,13 @@ static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two
 
 impl VM {
     pub fn new() -> VM {
+        let mut variables = HashMap::new();
+        variables.insert(
+            NATIVE_FUN_TIME.name.to_string(),
+            Value::NativeFunc(&NATIVE_FUN_TIME),
+        );
         VM {
-            global_env: GlobalEnvironment {
-                variables: HashMap::new(),
-            },
+            global_env: GlobalEnvironment { variables },
         }
     }
 
@@ -323,6 +359,22 @@ impl VM {
                     if falsey {
                         ip = target as usize;
                         continue;
+                    }
+                }
+                &OpCode::Call(args_count) => {
+                    let args = stack.drain((stack.len() - args_count as usize)..).collect();
+                    let callee = stack.pop().unwrap();
+                    match callee {
+                        Value::NativeFunc(nf) => {
+                            let result = (nf.fun)(args)?;
+                            stack.push(result);
+                        }
+                        _ => {
+                            return Err(InterpreteError {
+                                message: "Can only call functions and classes.".to_string(),
+                                line: chunk.get_line(curr_ip),
+                            });
+                        }
                     }
                 }
             };
