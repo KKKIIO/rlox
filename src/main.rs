@@ -27,9 +27,9 @@ fn main() {
     let mut vm = HandMakeVM::new();
     if let Some(fp) = matches.value_of("script") {
         let mut f = File::open(fp).unwrap();
-        let mut buf = String::new();
-        f.read_to_string(&mut buf).unwrap();
-        match parse_source(buf.as_str().into()) {
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        match parse_source(&buf) {
             Ok(program) => {
                 if let Err(err) = if show_compile {
                     vm.show_compile(&program)
@@ -40,8 +40,10 @@ fn main() {
                     exit(70);
                 }
             }
-            Err(e) => {
-                eprintln!("{}", e);
+            Err(errs) => {
+                for err in errs.iter() {
+                    eprintln!("{}", err);
+                }
                 exit(65);
             }
         }
@@ -59,14 +61,16 @@ fn main() {
             if line == "exit" {
                 break;
             }
-            match parse_source(line.into()) {
+            match parse_source(line.as_bytes()) {
                 Ok(program) => {
                     if let Err(err) = vm.run(&program) {
                         println!("{}\n[line {}] in script", err.message, err.line);
                     }
                 }
-                Err(e) => {
-                    println!("{}", e);
+                Err(errs) => {
+                    for err in errs.iter() {
+                        eprintln!("{}", err);
+                    }
                 }
             }
         }

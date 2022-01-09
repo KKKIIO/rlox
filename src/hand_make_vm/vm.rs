@@ -5,8 +5,6 @@ use std::{convert::TryFrom, ops::Deref};
 
 use gpoint::GPoint;
 
-use crate::ast::parse::LocatedAst;
-
 use super::error::InterpreteError;
 
 #[derive(Debug, PartialEq)]
@@ -87,19 +85,23 @@ where
         };
     }
 
-    pub fn build_for<'c, T>(&'c mut self, ast: &LocatedAst<T>) -> ChunkBuilder<'c, Str> {
-        ChunkBuilder {
-            chunk: self,
-            line: ast.line,
-        }
-    }
-
     pub fn add_code(&mut self, code: OpCode<Str>, line: u32) -> u16 {
         assert_eq!(self.codes.len(), self.lines.len());
         let i = self.codes.len().try_into().unwrap();
         self.codes.push(code);
         self.lines.push(line);
         i
+    }
+
+    pub fn add_const_str(&mut self, str: String, line: u32) {
+        let idx = self.const_str_pool.len();
+        self.const_str_pool.push(str);
+        let code = if let Ok(i) = u8::try_from(idx) {
+            OpCode::LoadConstStr(i)
+        } else {
+            OpCode::LoadConstStrLong(idx as u32)
+        };
+        self.add_code(code, line);
     }
 
     pub fn get_next_index(&mut self) -> u16 {
@@ -126,35 +128,6 @@ where
     }
 }
 
-pub struct ChunkBuilder<'c, Str>
-where
-    Str: Deref<Target = str> + Debug,
-{
-    chunk: &'c mut Chunk<Str>,
-    line: u32,
-}
-
-impl<'c, Str> ChunkBuilder<'c, Str>
-where
-    Str: Deref<Target = str> + Debug,
-{
-    pub fn code(&mut self, code: OpCode<Str>) -> &mut Self {
-        self.chunk.add_code(code, self.line);
-        self
-    }
-    pub fn add_const_str(&mut self, str: String) -> &mut Self {
-        let ref mut chunk = self.chunk;
-        let idx = chunk.const_str_pool.len();
-        chunk.const_str_pool.push(str);
-        let code = if let Ok(i) = u8::try_from(idx) {
-            OpCode::LoadConstStr(i)
-        } else {
-            OpCode::LoadConstStrLong(idx as u32)
-        };
-        chunk.add_code(code, self.line);
-        self
-    }
-}
 struct GlobalEnvironment {
     variables: HashMap<String, Value>,
 }

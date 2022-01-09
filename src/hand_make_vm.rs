@@ -1,4 +1,4 @@
-use crate::ast::program::Program;
+use crate::ast::statement::Program;
 
 use self::{compile::CompileRun, compile::StrPool, error::InterpreteError};
 

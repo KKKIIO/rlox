@@ -1,18 +1,22 @@
-use nom::Finish;
+use self::{error::GrammarError, scanner::Scanner, statement::Program, token::TokenType};
 
-use self::{
-    parse::{GrammarError, Span},
-    program::{program, Program},
-};
-
-pub mod comment;
+pub mod error;
 pub mod expression;
-pub mod identifier;
-pub mod parse;
-pub mod primary;
-pub mod program;
+pub mod parser;
+pub mod scanner;
 pub mod statement;
+pub mod token;
 
-pub fn parse_source(input: Span) -> Result<Program, GrammarError<Span>> {
-    program(input.into()).finish().map(|(_, program)| program)
+pub fn parse_source<'a>(src: &'a [u8]) -> Result<Program<'a>, Vec<GrammarError<'a>>> {
+    let mut scanner = Scanner::new(src);
+    let mut tokens = vec![];
+    loop {
+        let token: token::Token<'a> = scanner.scan_token().map_err(|e| vec![e])?;
+        let eof = token.ttype == TokenType::Eof;
+        tokens.push(token);
+        if eof {
+            break;
+        }
+    }
+    parser::parse(tokens)
 }
