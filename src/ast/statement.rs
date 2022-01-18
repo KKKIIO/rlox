@@ -2,11 +2,20 @@ use super::{expression::Expression, token::Token};
 
 #[derive(Debug, PartialEq)]
 pub enum DeclOrStmt<'a> {
-    Decl(VarDecl<'a>),
+    FunDecl(FunDecl<'a>),
+    VarDecl(VarDecl<'a>),
     Stmt(Statement<'a>),
 }
 
-// declaration    → varDecl | statement ;
+#[derive(Debug, PartialEq)]
+pub struct FunDecl<'a> {
+    pub fun_line: u32,
+    pub name: &'a str,
+    pub name_line: u32,
+    pub params: Vec<(&'a str, u32)>,
+    pub body: BlockStmt<'a>,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct VarDecl<'a> {
     pub name: Token<'a>,
@@ -21,6 +30,7 @@ pub enum Statement<'a> {
     Print(PrintStmt<'a>),
     While(WhileStmt<'a>),
     Block(BlockStmt<'a>),
+    Return(ReturnStmt<'a>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -37,7 +47,7 @@ pub struct PrintStmt<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct BlockStmt<'a> {
-    pub left_brace_line: u32,
+    pub right_brace_line: u32,
     pub stmts: Vec<DeclOrStmt<'a>>,
 }
 
@@ -66,6 +76,13 @@ pub struct WhileStmt<'a> {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct ReturnStmt<'a> {
+    pub return_line: u32,
+    pub value: Option<Expression<'a>>,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Program<'a> {
     pub statements: Vec<DeclOrStmt<'a>>,
+    pub eof_line: u32,
 }

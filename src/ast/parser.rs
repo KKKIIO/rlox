@@ -7,8 +7,8 @@ use super::{
     error::GrammarError,
     expression::{Assignment, Binary, Call, Expression, LiteralValue, Unary, Variable},
     statement::{
-        BlockStmt, DeclOrStmt, ExprStmt, ForStmt, IfStmt, PrintStmt, Program, Statement, VarDecl,
-        WhileStmt,
+        BlockStmt, DeclOrStmt, ExprStmt, ForStmt, FunDecl, IfStmt, PrintStmt, Program, ReturnStmt,
+        Statement, VarDecl, WhileStmt,
     },
     token::{Token, TokenType},
 };
@@ -32,7 +32,10 @@ pub fn parse<'a>(tokens: Vec<Token<'a>>) -> Result<Program<'a>, Vec<GrammarError
         }
     }
     if parser.errs.is_empty() {
-        Ok(Program { statements })
+        Ok(Program {
+            statements,
+            eof_line: parser.peek().line,
+        })
     } else {
         Err(parser.errs)
     }
@@ -47,12 +50,12 @@ impl<'a> Parser<'a> {
         let rs = if self.match_t(TokenType::Class) {
             todo!()
             // self.classDeclaration()
-        }
-        // else if self.match_t(TokenType::Fun) {self.function("function")}
-        else if self.match_t(TokenType::Var) {
-            self.var_declaration().map(|d| DeclOrStmt::Decl(d))
+        } else if self.match_t(TokenType::Fun) {
+            self.function().map(DeclOrStmt::FunDecl)
+        } else if self.match_t(TokenType::Var) {
+            self.var_declaration().map(DeclOrStmt::VarDecl)
         } else {
-            self.statement().map(|s| DeclOrStmt::Stmt(s))
+            self.statement().map(DeclOrStmt::Stmt)
         };
 
         match rs {
@@ -99,8 +102,8 @@ impl<'a> Parser<'a> {
             Statement::If(self.if_statement()?)
         } else if self.match_t(TokenType::Print) {
             Statement::Print(self.print_statement()?)
-        // } else if (self.match_t(TokenType::Return)) {
-        //     self.returnStatement()
+        } else if self.match_t(TokenType::Return) {
+            Statement::Return(self.return_statement()?)
         } else if self.match_t(TokenType::While) {
             Statement::While(self.while_statement()?)
         } else if self.match_t(TokenType::LeftBrace) {
@@ -116,7 +119,7 @@ impl<'a> Parser<'a> {
         let init = if self.match_t(TokenType::Semicolon) {
             None
         } else if self.match_t(TokenType::Var) {
-            Some(DeclOrStmt::Decl(self.var_declaration()?))
+            Some(DeclOrStmt::VarDecl(self.var_declaration()?))
         } else {
             Some(DeclOrStmt::Stmt(Statement::Expr(
                 self.expression_statement()?,
@@ -172,16 +175,19 @@ impl<'a> Parser<'a> {
         self.consume(TokenType::Semicolon, "Expect ';' after value.")?;
         Ok(PrintStmt { print_line, expr })
     }
-    // fn returnStatement() ->{
-    //   Token keyword = previous();
-    //   Expr value = null;
-    //   if (!check(SEMICOLON)) {
-    //     value = expression();
-    //   }
-
-    //   consume(SEMICOLON, "Expect ';' after return value.");
-    //   return new Stmt.Return(keyword, value);
-    // }
+    fn return_statement(&mut self) -> Result<ReturnStmt<'a>, GrammarError<'a>> {
+        let return_line = self.previous().line;
+        let value = if !self.check(TokenType::Semicolon) {
+            Some(self.expression()?)
+        } else {
+            None
+        };
+        self.consume(TokenType::Semicolon, "Expect ';' after return value.")?;
+        Ok(ReturnStmt {
+            return_line,
+            value: value.map(|e| e.into()),
+        })
+    }
 
     fn var_declaration(&mut self) -> Result<VarDecl<'a>, GrammarError<'a>> {
         let name = self.consume(TokenType::Identifier, "Expect variable name.")?;
@@ -223,34 +229,41 @@ impl<'a> Parser<'a> {
             semicolon_line,
         })
     }
-    //   private Stmt.Function function(String kind) {
-    //     Token name = consume(IDENTIFIER, "Expect " + kind + " name.");
-    //
-    //     consume(LEFT_PAREN, "Expect '(' after " + kind + " name.");
-    //     List<Token> parameters = new ArrayList<>();
-    //     if (!check(RIGHT_PAREN)) {
-    //       do {
-    //         if (parameters.size() >= 255) {
-    //           error(peek(), "Can't have more than 255 parameters.");
-    //         }
+    fn function(&mut self) -> Result<FunDecl<'a>, GrammarError<'a>> {
+        let fun_line = self.previous().line;
+        let name = self.consume(TokenType::Identifier, ERROR_FUNCTION_NAME)?;
+        self.consume(TokenType::LeftParen, ERROR_FUNCTION_LEFT_PAREN)?;
+        let mut params = vec![];
+        if !self.check(TokenType::RightParen) {
+            loop {
+                if params.len() >= 255 {
+                    self.errs.push(GrammarError::at_token(
+                        "Can't have more than 255 parameters.",
+                        self.peek(),
+                    ));
+                }
 
-    //         parameters.add(
-    //             consume(IDENTIFIER, "Expect parameter name."));
-    //       } while (self.match_t(COMMA));
-    //     }
-    //     consume(RIGHT_PAREN, "Expect ')' after parameters.");
-    //
-    //
+                let token = self.consume(TokenType::Identifier, "Expect parameter name.")?;
+                params.push((token.lexeme, token.line));
+                if !self.match_t(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenType::RightParen, "Expect ')' after parameters.")?;
 
-    //     consume(LEFT_BRACE, "Expect '{' before " + kind + " body.");
-    //     List<Stmt> body = block();
-    //     return new Stmt.Function(name, parameters, body);
-    //
-    //   }
-    //
-    //
+        self.consume(TokenType::LeftBrace, ERROR_FUNCTION_LEFT_BRACKET)?;
+        let body = self.block()?;
+        Ok(FunDecl {
+            fun_line,
+            name: name.lexeme,
+            name_line: name.line,
+            params,
+            body,
+        })
+    }
+
     fn block(&mut self) -> Result<BlockStmt<'a>, GrammarError<'a>> {
-        let left_brace_line = self.previous().line;
         let mut stmts = vec![];
 
         while !self.check(TokenType::RightBrace) && !self.is_at_end() {
@@ -259,9 +272,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.consume(TokenType::RightBrace, "Expect '}' after block.")?;
+        let right_brace_line = self
+            .consume(TokenType::RightBrace, "Expect '}' after block.")?
+            .line;
         Ok(BlockStmt {
-            left_brace_line,
+            right_brace_line,
             stmts,
         })
     }
@@ -583,3 +598,7 @@ impl<'a> Parser<'a> {
         }
     }
 }
+
+const ERROR_FUNCTION_NAME: &'static str = "Expect function name.";
+const ERROR_FUNCTION_LEFT_PAREN: &'static str = "Expect '(' after function name.";
+const ERROR_FUNCTION_LEFT_BRACKET: &'static str = "Expect '{' before function body.";

@@ -1,31 +1,20 @@
 use crate::ast::statement::Program;
 
-use self::{compile::CompileRun, compile::StrPool, error::InterpreteError};
+use self::{compile::compile, compile::StrPool, error::InterpreteError};
 
 pub mod compile;
 pub mod error;
 pub mod vm;
 
-pub struct HandMakeVM {
-    vm: vm::VM,
-    pool: StrPool,
+pub fn run(program: &Program) -> Result<(), InterpreteError> {
+    let pool = StrPool::new();
+    let codes = compile(program, &pool)?;
+    let mut vm = vm::VM::new(&pool);
+    vm.run(&codes)
 }
 
-impl HandMakeVM {
-    pub fn new() -> HandMakeVM {
-        HandMakeVM {
-            vm: vm::VM::new(),
-            pool: StrPool::new(),
-        }
-    }
-
-    pub fn run(&mut self, program: &Program) -> Result<(), InterpreteError> {
-        let mut chunk = CompileRun::compile(program, &self.pool)?;
-        self.vm.run(&mut chunk)
-    }
-
-    pub fn show_compile(&mut self, program: &Program) -> Result<(), InterpreteError> {
-        CompileRun::compile(program, &self.pool)?.print_chunk();
-        Ok(())
-    }
+pub fn show_compile(program: &Program) -> Result<(), InterpreteError> {
+    let pool = StrPool::new();
+    println!("{}", compile(program, &pool)?);
+    Ok(())
 }
