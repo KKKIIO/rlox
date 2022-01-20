@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::{cell::RefCell, collections::HashMap, convert::TryInto};
+use std::{cell::RefCell, convert::TryInto};
 use std::{convert::TryFrom, ops::Deref};
 use std::{fmt::Display, rc::Rc};
 
@@ -273,6 +273,18 @@ static ARITHMETIC_OPERAND_ERR_MSG: &'static str = "Operand must be a number.";
 static ARITHMETIC_OPERANDS_ERR_MSG: &'static str = "Operands must be numbers.";
 static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two strings.";
 
+fn add_global_var<'m>(
+    vars: &mut Vec<Option<Value<'m, Rc<str>>>>,
+    id: u32,
+    v: Value<'m, Rc<str>>,
+) -> () {
+    let id = id as usize;
+    if id >= vars.len() {
+        vars.resize(id + 1, None);
+    }
+    vars[id] = Some(v);
+}
+
 impl<'p> VM<'p> {
     pub fn new(str_pool: &'p StrPool) -> Self {
         VM { str_pool }
@@ -280,9 +292,10 @@ impl<'p> VM<'p> {
 
     pub fn run<'m>(&mut self, module: &'m Module) -> Result<(), InterpreteError> {
         let mut codes: &'m Codes = &module.main;
-        let mut global_variables = HashMap::new();
-        global_variables.insert(
-            "clock".to_string(),
+        let mut global_variables = vec![];
+        add_global_var(
+            &mut global_variables,
+            self.str_pool.register("clock"),
             Value::NativeFunc(NativeFun {
                 name: "clock",
                 fun: native_fun_clock,
@@ -311,28 +324,30 @@ impl<'p> VM<'p> {
                     stack.push(Value::String(self.str_pool.get(i).clone()));
                 }
                 &OpCode::DefGlobalVar(name_id) => {
-                    let name = self.str_pool.get(name_id);
-                    let value = stack.pop().unwrap();
-                    if let Some(v) = global_variables.get_mut(name.as_ref()) {
-                        *v = value;
-                    } else {
-                        global_variables.insert(name.to_string(), value);
-                    }
+                    add_global_var(&mut global_variables, name_id, stack.pop().unwrap());
                 }
                 &OpCode::LoadGlobalVar(name_id) => {
-                    let name = self.str_pool.get(name_id);
-                    let v = global_variables.get(name.as_ref()).ok_or(InterpreteError {
-                        message: format!("Undefined variable '{}'.", name.deref()),
-                        line: codes.get_line(curr_ip),
-                    })?;
+                    let v = global_variables
+                        .get(name_id as usize)
+                        .and_then(|o| o.as_ref())
+                        .ok_or_else(|| InterpreteError {
+                            message: format!(
+                                "Undefined variable '{}'.",
+                                self.str_pool.get(name_id)
+                            ),
+                            line: codes.get_line(curr_ip),
+                        })?;
                     stack.push(v.clone());
                 }
                 &OpCode::SetGlobalVar(name_id) => {
-                    let name = self.str_pool.get(name_id);
                     let v = global_variables
-                        .get_mut(name.deref())
-                        .ok_or(InterpreteError {
-                            message: format!("Undefined variable '{}'.", name.deref()),
+                        .get_mut(name_id as usize)
+                        .and_then(|o| o.as_mut())
+                        .ok_or_else(|| InterpreteError {
+                            message: format!(
+                                "Undefined variable '{}'.",
+                                self.str_pool.get(name_id)
+                            ),
                             line: codes.get_line(curr_ip),
                         })?;
                     *v = stack.last().unwrap().clone();
