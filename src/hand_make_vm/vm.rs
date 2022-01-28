@@ -1,5 +1,5 @@
 use core::fmt::Debug;
-use std::{cell::RefCell, convert::TryInto};
+use std::{cell::RefCell, collections::HashMap, convert::TryInto};
 use std::{convert::TryFrom, ops::Deref};
 use std::{fmt::Display, rc::Rc};
 
@@ -38,6 +38,7 @@ pub enum OpCode {
     JumpIfFalse(JumpIfParam),
     Call(u8),
     MakeClosure(u32),
+    MakeClass(u32),
     Return,
 }
 
@@ -132,6 +133,20 @@ pub struct FunPrototype {
     pub upvalue_indexes: Box<[UpvalueIndex]>,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+struct Class<'m> {
+    proto: &'m ClassPrototype,
+    super_proto: Option<&'m ClassPrototype>,
+    fields: HashMap<Rc<str>, Value<'m, Rc<str>>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ClassPrototype {
+    pub name: Rc<str>,
+    pub has_super_class: bool,
+    pub methods: HashMap<Rc<str>, FunPrototype>,
+}
+
 fn native_fun_clock<Str>(_args: Vec<Value<Str>>) -> Result<Value<Str>, InterpreteError>
 where
     Str: Deref<Target = str>,
@@ -221,6 +236,7 @@ impl Display for Codes {
 pub struct Module {
     pub main: Codes,
     pub funs: Box<[FunPrototype]>,
+    pub classes: Box<[Rc<ClassPrototype>]>,
 }
 
 impl Display for Module {
@@ -618,6 +634,7 @@ impl<'p> VM<'p> {
                         open_value.as_ref().replace(Upvalue::Closed(v));
                     }
                 }
+                OpCode::MakeClass(_) => todo!(),
             };
         }
     }

@@ -22,13 +22,22 @@ pub enum Expression<'a> {
     Unary(Unary<'a>),
     Binary(Binary<'a>),
     Grouping(Box<Expression<'a>>),
+    Super(Super<'a>),
+    This(This),
     Variable(Variable<'a>),
+    Get(Get<'a>),
     Call(Call<'a>),
 }
 
 #[derive(Debug, PartialEq)]
+pub enum LValue<'a> {
+    Variable(Variable<'a>),
+    Get(Get<'a>),
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Assignment<'a> {
-    pub var_name: &'a str,
+    pub lvalue: LValue<'a>,
     pub op_line: u32,
     pub expr: Box<Expression<'a>>,
 }
@@ -51,6 +60,24 @@ pub struct Unary<'a> {
     pub op: TokenType,
     pub op_line: u32,
     pub right: Box<Expression<'a>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Super<'a> {
+    pub super_line: u32,
+    pub method: &'a str,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct This {
+    pub this_line: u32,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Get<'a> {
+    pub expr: Box<Expression<'a>>,
+    pub dot_line: u32,
+    pub name: &'a str,
 }
 
 #[derive(Debug, PartialEq)]

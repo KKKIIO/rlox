@@ -8,7 +8,7 @@ use crate::ast::{
 
 use super::{
     error::InterpreteError,
-    vm::{Chunk, FunPrototype, JumpIfParam, Module, OpCode, UpvalueIndex},
+    vm::{Chunk, ClassPrototype, FunPrototype, JumpIfParam, Module, OpCode, UpvalueIndex},
 };
 
 pub struct StrPool {
@@ -45,8 +45,9 @@ impl StrPool {
 
 pub fn compile(program: &'_ Program, str_pool: &'_ StrPool) -> Result<Module, InterpreteError> {
     let mut funs = Vec::new();
+    let mut classes = Vec::new();
     let mut scopes = vec![];
-    let mut c = FunCompiler::new(str_pool, &mut scopes, &mut funs);
+    let mut c = ScopeCompiler::new(str_pool, &mut scopes, &mut funs, &mut classes);
     for stmt in program.statements.iter() {
         c.compile_decl_or_stmt(&stmt)?;
     }
@@ -54,17 +55,18 @@ pub fn compile(program: &'_ Program, str_pool: &'_ StrPool) -> Result<Module, In
     Ok(Module {
         main: c.chunk.build(),
         funs: funs.into_iter().map(|f| f.into()).collect(),
+        classes: classes.into_iter().map(|c| c.into()).collect(),
     })
 }
 
 #[derive(Debug)]
-struct CrossFunScope<'s> {
+struct Scope<'s> {
     vars: Vec<(&'s str, bool)>,
-    var_count_per_scope: Vec<u8>,
+    var_count_per_block: Vec<u8>,
     upvalue_indexes: Vec<UpvalueIndex>,
 }
 
-impl<'s> CrossFunScope<'s> {
+impl<'s> Scope<'s> {
     fn register_upvalue(&mut self, idx: UpvalueIndex) -> u8 {
         if let Some(i) = self.upvalue_indexes.iter().position(|&x| x == idx) {
             i.try_into().unwrap()
@@ -81,22 +83,29 @@ impl<'s> CrossFunScope<'s> {
     fn new() -> Self {
         Self {
             vars: Vec::new(),
-            var_count_per_scope: Vec::new(),
+            var_count_per_block: Vec::new(),
             upvalue_indexes: Vec::new(),
         }
     }
     fn is_in_global_scope(&self) -> bool {
-        self.var_count_per_scope.is_empty()
+        self.var_count_per_block.is_empty()
     }
-    fn push_scope(&mut self) {
-        self.var_count_per_scope.push(0);
+    fn new_block(&mut self) {
+        self.var_count_per_block.push(0);
+    }
+    fn end_block(&mut self) -> Box<[bool]> {
+        let cnt = self.var_count_per_block.pop().unwrap();
+        self.vars
+            .drain((self.vars.len() - (cnt as usize))..)
+            .map(|(_, captured)| captured)
+            .collect()
     }
     fn new_var(&mut self, name: &'s str) -> Result<(), &'static str> {
         if self.vars.len() >= u8::MAX as usize {
             return Err("too many variables");
         }
         self.vars.push((name, false));
-        let cnt = self.var_count_per_scope.last_mut().unwrap();
+        let cnt = self.var_count_per_block.last_mut().unwrap();
         *cnt += 1;
         Ok(())
     }
@@ -112,42 +121,38 @@ impl<'s> CrossFunScope<'s> {
             self.vars[i as usize].1 = true;
         })
     }
-    fn pop_scope(&mut self) -> Box<[bool]> {
-        let cnt = self.var_count_per_scope.pop().unwrap();
-        self.vars
-            .drain((self.vars.len() - (cnt as usize))..)
-            .map(|(_, captured)| captured)
-            .collect()
-    }
 }
 
-struct FunCompiler<'p, 's, 'o> {
+struct ScopeCompiler<'p, 's, 'o> {
     str_pool: &'p StrPool,
-    scopes: &'o mut Vec<CrossFunScope<'s>>,
+    scopes: &'o mut Vec<Scope<'s>>,
     funs: &'o mut Vec<FunPrototype>,
+    classes: &'o mut Vec<ClassPrototype>,
     chunk: Chunk<'p>,
 }
 
-impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
+impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
     fn new(
         str_pool: &'p StrPool,
-        scopes: &'o mut Vec<CrossFunScope<'s>>,
+        scopes: &'o mut Vec<Scope<'s>>,
         funs: &'o mut Vec<FunPrototype>,
+        classes: &'o mut Vec<ClassPrototype>,
     ) -> Self {
-        scopes.push(CrossFunScope::new());
+        scopes.push(Scope::new());
         Self {
             str_pool,
             scopes,
             funs,
+            classes,
             chunk: Chunk::new(str_pool),
         }
     }
     fn compile_decl_or_stmt(&'_ mut self, ds: &'_ DeclOrStmt<'s>) -> Result<(), InterpreteError> {
         match ds {
             DeclOrStmt::FunDecl(d) => {
-                let is_in_global_scope = self.scopes.last().unwrap().is_in_global_scope();
+                let in_global_scope = self.scopes.last().unwrap().is_in_global_scope();
                 // early bind
-                if !is_in_global_scope {
+                if !in_global_scope {
                     self.scopes
                         .last_mut()
                         .unwrap()
@@ -158,8 +163,13 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                         })?
                 }
                 let codes = {
-                    let mut c = FunCompiler::new(self.str_pool, &mut self.scopes, self.funs);
-                    c.scopes.last_mut().unwrap().push_scope();
+                    let mut c = ScopeCompiler::new(
+                        self.str_pool,
+                        &mut self.scopes,
+                        self.funs,
+                        self.classes,
+                    );
+                    c.scopes.last_mut().unwrap().new_block();
                     for &(name, line) in d.params.iter() {
                         let cross_fun_scope = c.scopes.last_mut().unwrap();
                         if cross_fun_scope.is_in_global_scope() {
@@ -193,7 +203,7 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                 let fun_id = self.funs.len().try_into().unwrap();
                 self.funs.push(fun);
                 self.chunk.add_code(OpCode::MakeClosure(fun_id), d.fun_line);
-                if is_in_global_scope {
+                if in_global_scope {
                     self.chunk.add_code(
                         OpCode::DefGlobalVar(self.str_pool.register(d.name)),
                         d.name_line,
@@ -205,6 +215,14 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
             }
             DeclOrStmt::Stmt(ref stmt) => {
                 self.compile_stmt(stmt)?;
+            }
+            DeclOrStmt::ClassDecl(cls) => {
+                // let id = self.classes.len().try_into().unwrap();
+                self.classes.push(ClassPrototype {
+                    name: cls.name.into(),
+                    has_super_class: cls.super_class.is_some(),
+                    methods: todo!(),
+                });
             }
         };
         Ok(())
@@ -251,9 +269,8 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                 self.compile_expression(&stmt.cond)?;
                 let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
                 self.compile_stmt(&stmt.then_branch)?;
-                if let Some(box ref else_branch) = stmt.else_branch {
-                    // fixme: use `else`.line
-                    let jmp = JumpPlaceholder::new(&mut self.chunk, line);
+                if let Some((else_line, box ref else_branch)) = stmt.else_branch {
+                    let jmp = JumpPlaceholder::new(&mut self.chunk, else_line);
                     let else_i = self.chunk.get_next_index();
                     jif.set_target(&mut self.chunk, else_i);
                     self.compile_stmt(&else_branch)?;
@@ -275,7 +292,7 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                 jif.set_target(&mut self.chunk, res_i);
             }
             Statement::For(stmt) => {
-                self.scopes.last_mut().unwrap().push_scope();
+                self.scopes.last_mut().unwrap().new_block();
                 if let Some(box ref init) = stmt.init {
                     match init {
                         DeclOrStmt::VarDecl(l) => {
@@ -305,7 +322,7 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                     let res_i = self.chunk.get_next_index();
                     jif.set_target(&mut self.chunk, res_i);
                 }
-                let vars = self.scopes.last_mut().unwrap().pop_scope();
+                let vars = self.scopes.last_mut().unwrap().end_block();
                 assert!(vars.len() <= 1);
                 for &captured in vars.iter() {
                     self.chunk.add_code(
@@ -332,11 +349,11 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
     }
 
     fn compile_block(&mut self, block: &BlockStmt<'s>) -> Result<(), InterpreteError> {
-        self.scopes.last_mut().unwrap().push_scope();
+        self.scopes.last_mut().unwrap().new_block();
         for stmt in block.stmts.iter() {
             self.compile_decl_or_stmt(&stmt)?;
         }
-        let vars = self.scopes.last_mut().unwrap().pop_scope();
+        let vars = self.scopes.last_mut().unwrap().end_block();
         for &captured in vars.iter().rev() {
             self.chunk.add_code(
                 if captured {
@@ -464,17 +481,23 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
             }
             Expression::Assignment(a) => {
                 self.compile_expression(&a.expr)?;
-                if let Some(idx) = self.scopes.last().unwrap().position(a.var_name) {
-                    self.chunk.add_code(OpCode::SetLobalVar(idx), a.op_line);
-                } else if let Some(idx) =
-                    resolve_upvalue(self.scopes, self.scopes.len() - 1, a.var_name)
-                {
-                    self.chunk.add_code(OpCode::SetUpvalue(idx), a.op_line);
-                } else {
-                    self.chunk.add_code(
-                        OpCode::SetGlobalVar(self.str_pool.register(a.var_name)),
-                        a.op_line,
-                    );
+                match &a.lvalue {
+                    crate::ast::expression::LValue::Variable(v) => {
+                        let var_name = v.name;
+                        if let Some(idx) = self.scopes.last().unwrap().position(var_name) {
+                            self.chunk.add_code(OpCode::SetLobalVar(idx), a.op_line);
+                        } else if let Some(idx) =
+                            resolve_upvalue(self.scopes, self.scopes.len() - 1, var_name)
+                        {
+                            self.chunk.add_code(OpCode::SetUpvalue(idx), a.op_line);
+                        } else {
+                            self.chunk.add_code(
+                                OpCode::SetGlobalVar(self.str_pool.register(var_name)),
+                                a.op_line,
+                            );
+                        }
+                    }
+                    crate::ast::expression::LValue::Get(_) => todo!(),
                 }
             }
             Expression::Call(c) => {
@@ -487,16 +510,22 @@ impl<'p, 's, 'o> FunCompiler<'p, 's, 'o> {
                     c.left_paren_line,
                 );
             }
+            Expression::Super(_) => todo!(),
+            Expression::This(_) => todo!(),
+            Expression::Get(_) => todo!(),
         }
         Ok(())
     }
+
+    fn curr_scope(&self) -> &Scope<'s> {
+        self.scopes.last().unwrap()
+    }
+    fn curr_scope_mut(&mut self) -> &mut Scope<'s> {
+        self.scopes.last_mut().unwrap()
+    }
 }
 
-fn resolve_upvalue<'s>(
-    scopes: &'_ mut Vec<CrossFunScope<'s>>,
-    curr: usize,
-    name: &'s str,
-) -> Option<u8> {
+fn resolve_upvalue<'s>(scopes: &'_ mut Vec<Scope<'s>>, curr: usize, name: &'s str) -> Option<u8> {
     if curr > 0 {
         let outer = curr - 1;
         if let Some(idx) = scopes[outer].try_capture(name) {

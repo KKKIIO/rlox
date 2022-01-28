@@ -5,10 +5,13 @@ use crate::ast::expression::Literal;
 
 use super::{
     error::GrammarError,
-    expression::{Assignment, Binary, Call, Expression, LiteralValue, Unary, Variable},
+    expression::{
+        Assignment, Binary, Call, Expression, Get, LValue, LiteralValue, Super, This, Unary,
+        Variable,
+    },
     statement::{
-        BlockStmt, DeclOrStmt, ExprStmt, ForStmt, FunDecl, IfStmt, PrintStmt, Program, ReturnStmt,
-        Statement, VarDecl, WhileStmt,
+        BlockStmt, ClassDecl, DeclOrStmt, ExprStmt, ForStmt, FunDecl, IfStmt, PrintStmt, Program,
+        ReturnStmt, Statement, VarDecl, WhileStmt,
     },
     token::{Token, TokenType},
 };
@@ -17,6 +20,11 @@ struct Parser<'a> {
     tokens: Vec<Token<'a>>,
     current: usize,
     errs: Vec<GrammarError<'a>>,
+}
+
+enum FunType {
+    Fun,
+    Method,
 }
 
 pub fn parse<'a>(tokens: Vec<Token<'a>>) -> Result<Program<'a>, Vec<GrammarError<'a>>> {
@@ -48,10 +56,9 @@ impl<'a> Parser<'a> {
     // return option instead of Result to continue parsing
     fn declaration(&mut self) -> Option<DeclOrStmt<'a>> {
         let rs = if self.match_t(TokenType::Class) {
-            todo!()
-            // self.classDeclaration()
+            self.class_declaration().map(DeclOrStmt::ClassDecl)
         } else if self.match_t(TokenType::Fun) {
-            self.function().map(DeclOrStmt::FunDecl)
+            self.function(FunType::Fun).map(DeclOrStmt::FunDecl)
         } else if self.match_t(TokenType::Var) {
             self.var_declaration().map(DeclOrStmt::VarDecl)
         } else {
@@ -67,33 +74,31 @@ impl<'a> Parser<'a> {
             }
         }
     }
-    //   fn classDeclaration() ->Result<DeclOrStmt<'a>,GrammarError<'a>> {
-    //     let name = consume(IDENTIFIER, "Expect class name.");
-    //
 
-    //     Expr.Variable superclass = null;
-    //     if (self.match_t(LESS)) {
-    //       consume(IDENTIFIER, "Expect superclass name.");
-    //       superclass = new Expr.Variable(previous());
-    //     }
-
-    //
-    //     consume(LEFT_BRACE, "Expect '{' before class body.");
-
-    //     List<Stmt.Function> methods = new ArrayList<>();
-    //     while (!check(RIGHT_BRACE) && !isAtEnd()) {
-    //       methods.add(function("method"));
-    //     }
-
-    //     consume(RIGHT_BRACE, "Expect '}' after class body.");
-
-    // /* Classes parse-class-declaration < Inheritance construct-class-ast
-    //     return new Stmt.Class(name, methods);
-    // */
-    //
-    //     return new Stmt.Class(name, superclass, methods);
-    //
-    //   }
+    fn class_declaration(&mut self) -> Result<ClassDecl<'a>, GrammarError<'a>> {
+        let name = self
+            .consume(TokenType::Identifier, "Expect class name.")?
+            .lexeme;
+        let super_class = if self.match_t(TokenType::Less) {
+            Some(
+                self.consume(TokenType::Identifier, "Expect superclass name.")?
+                    .lexeme,
+            )
+        } else {
+            None
+        };
+        self.consume(TokenType::LeftBrace, "Expect '{' before class body.")?;
+        let mut methods = vec![];
+        while !self.check(TokenType::RightBrace) && !self.is_at_end() {
+            methods.push(self.function(FunType::Method)?);
+        }
+        self.consume(TokenType::RightBrace, "Expect '}' after class body.")?;
+        Ok(ClassDecl {
+            name,
+            super_class,
+            methods,
+        })
+    }
 
     fn statement(&mut self) -> Result<Statement<'a>, GrammarError<'a>> {
         Ok(if self.match_t(TokenType::For) {
@@ -157,7 +162,7 @@ impl<'a> Parser<'a> {
 
         let then_branch = self.statement()?;
         let else_branch = if self.match_t(TokenType::Else) {
-            Some(self.statement()?)
+            Some((self.previous().line, self.statement()?.into()))
         } else {
             None
         };
@@ -165,7 +170,7 @@ impl<'a> Parser<'a> {
             if_line,
             cond: cond.into(),
             then_branch: then_branch.into(),
-            else_branch: else_branch.map(|s| s.into()),
+            else_branch,
         })
     }
 
@@ -229,10 +234,23 @@ impl<'a> Parser<'a> {
             semicolon_line,
         })
     }
-    fn function(&mut self) -> Result<FunDecl<'a>, GrammarError<'a>> {
+
+    fn function(&mut self, fun_type: FunType) -> Result<FunDecl<'a>, GrammarError<'a>> {
+        let (err_name, err_leftparen, err_function_left_bracket) = match fun_type {
+            FunType::Fun => (
+                ERROR_FUNCTION_NAME,
+                ERROR_FUNCTION_LEFT_PAREN,
+                ERROR_FUNCTION_LEFT_BRACKET,
+            ),
+            FunType::Method => (
+                ERROR_METHOD_NAME,
+                ERROR_METHOD_LEFT_PAREN,
+                ERROR_METHOD_LEFT_BRACKET,
+            ),
+        };
         let fun_line = self.previous().line;
-        let name = self.consume(TokenType::Identifier, ERROR_FUNCTION_NAME)?;
-        self.consume(TokenType::LeftParen, ERROR_FUNCTION_LEFT_PAREN)?;
+        let name = self.consume(TokenType::Identifier, err_name)?;
+        self.consume(TokenType::LeftParen, err_leftparen)?;
         let mut params = vec![];
         if !self.check(TokenType::RightParen) {
             loop {
@@ -252,7 +270,7 @@ impl<'a> Parser<'a> {
         }
         self.consume(TokenType::RightParen, "Expect ')' after parameters.")?;
 
-        self.consume(TokenType::LeftBrace, ERROR_FUNCTION_LEFT_BRACKET)?;
+        self.consume(TokenType::LeftBrace, err_function_left_bracket)?;
         let body = self.block()?;
         Ok(FunDecl {
             fun_line,
@@ -288,26 +306,27 @@ impl<'a> Parser<'a> {
             let equals = self.previous();
             let right = self.assignment()?;
 
-            match &left {
-                Expression::Variable(v) => {
-                    return Ok(Expression::Assignment(Assignment {
-                        var_name: v.name,
-                        expr: right.into(),
-                        op_line: equals.line,
-                    }));
-                }
+            match left {
+                Expression::Variable(v) => Ok(Expression::Assignment(Assignment {
+                    lvalue: LValue::Variable(v),
+                    expr: right.into(),
+                    op_line: equals.line,
+                })),
+                Expression::Get(g) => Ok(Expression::Assignment(Assignment {
+                    lvalue: LValue::Get(g),
+                    expr: right.into(),
+                    op_line: equals.line,
+                })),
                 _ => {
                     // [no-throw]
                     self.errs
                         .push(GrammarError::at_token("Invalid assignment target.", equals));
-                } // todo
-                  //       else if (expr instanceof Expr.Get) {
-                  //         Expr.Get get = (Expr.Get)expr;
-                  //         return new Expr.Set(get.object, get.name, value);
-                  //       }
+                    Ok(left)
+                }
             }
+        } else {
+            Ok(left)
         }
-        Ok(left)
     }
 
     fn or(&mut self) -> Result<Expression<'a>, GrammarError<'a>> {
@@ -460,14 +479,17 @@ impl<'a> Parser<'a> {
         loop {
             if self.match_t(TokenType::LeftParen) {
                 expr = self.finish_call(expr)?;
-            }
-            //    else if (self.match_t(TokenType::Dot)) {
-            //     let name = self.consume(TokenType::Identifier,
-            //         "Expect property name after '.'.")?;
-            //     expr = new Expr.Get(expr, name);
-
-            //   }
-            else {
+            } else if self.match_t(TokenType::Dot) {
+                let dot_line = self.previous().line;
+                let name = self
+                    .consume(TokenType::Identifier, "Expect property name after '.'.")?
+                    .lexeme;
+                expr = Expression::Get(Get {
+                    expr: expr.into(),
+                    dot_line,
+                    name,
+                });
+            } else {
                 break;
             }
         }
@@ -505,17 +527,18 @@ impl<'a> Parser<'a> {
                 value: LiteralValue::String(s),
                 line,
             }))
-        }
-        // if (self.match_t(SUPER)) {
-        //   Token keyword = previous();
-        //   consume(DOT, "Expect '.' after 'super'.");
-        //   Token method = consume(IDENTIFIER,
-        //       "Expect superclass method name.");
-        //   return new Expr.Super(keyword, method);
-        // }
-
-        // if (self.match_t(THIS)) return new Expr.This(previous());
-        else if self.match_t(TokenType::Identifier) {
+        } else if self.match_t(TokenType::Super) {
+            let super_line = self.previous().line;
+            self.consume(TokenType::Dot, "Expect '.' after 'super'.")?;
+            let method = self
+                .consume(TokenType::Identifier, "Expect superclass method name.")?
+                .lexeme;
+            Ok(Expression::Super(Super { super_line, method }))
+        } else if self.match_t(TokenType::This) {
+            Ok(Expression::This(This {
+                this_line: self.previous().line,
+            }))
+        } else if self.match_t(TokenType::Identifier) {
             let id = self.previous();
             Ok(Expression::Variable(Variable {
                 name: id.lexeme,
@@ -602,3 +625,7 @@ impl<'a> Parser<'a> {
 const ERROR_FUNCTION_NAME: &'static str = "Expect function name.";
 const ERROR_FUNCTION_LEFT_PAREN: &'static str = "Expect '(' after function name.";
 const ERROR_FUNCTION_LEFT_BRACKET: &'static str = "Expect '{' before function body.";
+
+const ERROR_METHOD_NAME: &'static str = "Expect method name.";
+const ERROR_METHOD_LEFT_PAREN: &'static str = "Expect '(' after method name.";
+const ERROR_METHOD_LEFT_BRACKET: &'static str = "Expect '{' before method body.";

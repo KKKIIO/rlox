@@ -2,9 +2,17 @@ use super::{expression::Expression, token::Token};
 
 #[derive(Debug, PartialEq)]
 pub enum DeclOrStmt<'a> {
+    ClassDecl(ClassDecl<'a>),
     FunDecl(FunDecl<'a>),
     VarDecl(VarDecl<'a>),
     Stmt(Statement<'a>),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ClassDecl<'a> {
+    pub name: &'a str,
+    pub super_class: Option<&'a str>,
+    pub methods: Vec<FunDecl<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -56,7 +64,7 @@ pub struct IfStmt<'a> {
     pub if_line: u32,
     pub cond: Expression<'a>,
     pub then_branch: Box<Statement<'a>>,
-    pub else_branch: Option<Box<Statement<'a>>>,
+    pub else_branch: Option<(u32, Box<Statement<'a>>)>,
 }
 
 #[derive(Debug, PartialEq)]

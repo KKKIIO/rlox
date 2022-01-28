@@ -10,6 +10,7 @@ num-traits = "0.2"
 num-derive = "0.2"
 gpoint = "0.2.1"
 clap = "2"
+gc = { version = "0.4", features = ["derive"] }
 # inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = [
 #     "llvm10-0",
 # ] }
