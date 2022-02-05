@@ -1,4 +1,4 @@
-use super::token::TokenType;
+use super::token::Token;
 
 #[derive(Debug, PartialEq)]
 pub enum LiteralValue {
@@ -23,7 +23,7 @@ pub enum Expression<'a> {
     Binary(Binary<'a>),
     Grouping(Box<Expression<'a>>),
     Super(Super<'a>),
-    This(This),
+    This(This<'a>),
     Variable(Variable<'a>),
     Get(Get<'a>),
     Call(Call<'a>),
@@ -43,22 +43,19 @@ pub struct Assignment<'a> {
 }
 #[derive(Debug, PartialEq)]
 pub struct Variable<'a> {
-    pub name: &'a str,
-    pub line: u32,
+    pub name: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Binary<'a> {
     pub left: Box<Expression<'a>>,
-    pub op: TokenType,
-    pub op_line: u32,
+    pub op: Token<'a>,
     pub right: Box<Expression<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Unary<'a> {
-    pub op: TokenType,
-    pub op_line: u32,
+    pub op: Token<'a>,
     pub right: Box<Expression<'a>>,
 }
 
@@ -69,15 +66,15 @@ pub struct Super<'a> {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct This {
-    pub this_line: u32,
+pub struct This<'a> {
+    pub this: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Get<'a> {
     pub expr: Box<Expression<'a>>,
-    pub dot_line: u32,
-    pub name: &'a str,
+    pub dot: Token<'a>,
+    pub name: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]

@@ -1,4 +1,4 @@
-use self::{error::GrammarError, scanner::Scanner, statement::Program, token::TokenType};
+use self::{error::GrammarError, scanner::Scanner, statement::File, token::TokenType};
 
 pub mod error;
 pub mod expression;
@@ -7,7 +7,7 @@ pub mod scanner;
 pub mod statement;
 pub mod token;
 
-pub fn parse_source<'a>(src: &'a [u8]) -> Result<Program<'a>, Vec<GrammarError<'a>>> {
+pub fn parse_source<'a>(src: &'a [u8]) -> Result<File<'a>, Vec<GrammarError<'a>>> {
     let mut scanner = Scanner::new(src);
     let mut tokens = vec![];
     loop {

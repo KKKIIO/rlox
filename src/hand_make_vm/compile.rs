@@ -1,53 +1,31 @@
-use std::{cell::RefCell, convert::TryInto, rc::Rc};
+use std::{
+    convert::TryInto,
+    num::TryFromIntError,
+    ops::{Deref, Neg},
+    rc::Rc,
+};
 
 use crate::ast::{
+    error::GrammarError,
     expression::{Expression, LiteralValue},
-    statement::{BlockStmt, DeclOrStmt, Program, Statement, VarDecl},
-    token::TokenType,
+    statement::{BlockStmt, DeclOrStmt, File, Statement, VarDecl},
+    token::{Token, TokenType},
 };
 
 use super::{
-    error::InterpreteError,
-    vm::{Chunk, ClassPrototype, FunPrototype, JumpIfParam, Module, OpCode, UpvalueIndex},
+    chunk::Chunk,
+    str_pool::StrPool,
+    vm::{ClassPrototype, FunPrototype, Module, OpCode, UpvalueIndex},
 };
 
-pub struct StrPool {
-    pool: RefCell<Vec<Rc<str>>>,
-}
-
-impl StrPool {
-    pub fn new() -> Self {
-        Self {
-            pool: RefCell::new(Vec::new()),
-        }
-    }
-
-    pub fn register(&self, name: &str) -> u32 {
-        let pos_res = self
-            .pool
-            .borrow()
-            .iter()
-            .position(|n| (*n).as_ref() == name);
-        if let Some(i) = pos_res {
-            i
-        } else {
-            let mut p = self.pool.borrow_mut();
-            p.push(name.to_string().into_boxed_str().into());
-            p.len() - 1
-        }
-        .try_into()
-        .unwrap()
-    }
-    pub fn get(&self, i: u32) -> Rc<str> {
-        self.pool.borrow()[i as usize].clone()
-    }
-}
-
-pub fn compile(program: &'_ Program, str_pool: &'_ StrPool) -> Result<Module, InterpreteError> {
+pub fn compile<'s>(
+    program: &'_ File<'s>,
+    str_pool: &'_ StrPool,
+) -> Result<Module, GrammarError<'s>> {
     let mut funs = Vec::new();
     let mut classes = Vec::new();
-    let mut scopes = vec![];
-    let mut c = ScopeCompiler::new(str_pool, &mut scopes, &mut funs, &mut classes);
+    let mut scopes = vec![Scope::new()];
+    let mut c = StmtsCompiler::new(str_pool, &mut scopes, &mut funs, &mut classes);
     for stmt in program.statements.iter() {
         c.compile_decl_or_stmt(&stmt)?;
     }
@@ -67,19 +45,6 @@ struct Scope<'s> {
 }
 
 impl<'s> Scope<'s> {
-    fn register_upvalue(&mut self, idx: UpvalueIndex) -> u8 {
-        if let Some(i) = self.upvalue_indexes.iter().position(|&x| x == idx) {
-            i.try_into().unwrap()
-        } else {
-            let i = self
-                .upvalue_indexes
-                .len()
-                .try_into()
-                .expect("too many upvalues");
-            self.upvalue_indexes.push(idx);
-            i
-        }
-    }
     fn new() -> Self {
         Self {
             vars: Vec::new(),
@@ -87,25 +52,44 @@ impl<'s> Scope<'s> {
             upvalue_indexes: Vec::new(),
         }
     }
-    fn is_in_global_scope(&self) -> bool {
+    fn register_upvalue(&mut self, idx: UpvalueIndex) -> Result<u8, &'static str> {
+        if let Some(i) = self.upvalue_indexes.iter().position(|&x| x == idx) {
+            Ok(i.try_into().unwrap())
+        } else {
+            let i = self
+                .upvalue_indexes
+                .len()
+                .try_into()
+                .map_err(|_| "Too many closure variables in function.")?;
+            self.upvalue_indexes.push(idx);
+            Ok(i)
+        }
+    }
+    fn is_in_global(&self) -> bool {
         self.var_count_per_block.is_empty()
     }
     fn new_block(&mut self) {
         self.var_count_per_block.push(0);
     }
-    fn end_block(&mut self) -> Box<[bool]> {
+    fn close_block(&mut self) -> Box<[bool]> {
         let cnt = self.var_count_per_block.pop().unwrap();
         self.vars
             .drain((self.vars.len() - (cnt as usize))..)
             .map(|(_, captured)| captured)
             .collect()
     }
-    fn new_var(&mut self, name: &'s str) -> Result<(), &'static str> {
+    fn add_var(&mut self, name: &'s str) -> Result<(), &'static str> {
         if self.vars.len() >= u8::MAX as usize {
-            return Err("too many variables");
+            return Err("Too many local variables in function.");
+        }
+        let cnt = self.var_count_per_block.last_mut().unwrap();
+        if self.vars[self.vars.len() - (*cnt as usize)..]
+            .iter()
+            .any(|&(n, _)| n == name)
+        {
+            return Err("Already a variable with this name in this scope.");
         }
         self.vars.push((name, false));
-        let cnt = self.var_count_per_block.last_mut().unwrap();
         *cnt += 1;
         Ok(())
     }
@@ -117,28 +101,29 @@ impl<'s> Scope<'s> {
             .map(|i| (self.vars.len() - i - 1) as u8)
     }
     fn try_capture(&mut self, name: &'_ str) -> Option<u8> {
-        self.position(name).inspect(|&i| {
+        let position = self.position(name);
+        if let &Some(i) = &position {
             self.vars[i as usize].1 = true;
-        })
+        }
+        position
     }
 }
 
-struct ScopeCompiler<'p, 's, 'o> {
-    str_pool: &'p StrPool,
+struct StmtsCompiler<'s, 'o> {
+    str_pool: &'o StrPool,
     scopes: &'o mut Vec<Scope<'s>>,
     funs: &'o mut Vec<FunPrototype>,
     classes: &'o mut Vec<ClassPrototype>,
-    chunk: Chunk<'p>,
+    chunk: Chunk<'o>,
 }
 
-impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
+impl<'s, 'o> StmtsCompiler<'s, 'o> {
     fn new(
-        str_pool: &'p StrPool,
+        str_pool: &'o StrPool,
         scopes: &'o mut Vec<Scope<'s>>,
         funs: &'o mut Vec<FunPrototype>,
         classes: &'o mut Vec<ClassPrototype>,
     ) -> Self {
-        scopes.push(Scope::new());
         Self {
             str_pool,
             scopes,
@@ -147,111 +132,165 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
             chunk: Chunk::new(str_pool),
         }
     }
-    fn compile_decl_or_stmt(&'_ mut self, ds: &'_ DeclOrStmt<'s>) -> Result<(), InterpreteError> {
+    fn compile_decl_or_stmt(&'_ mut self, ds: &'_ DeclOrStmt<'s>) -> Result<(), GrammarError<'s>> {
         match ds {
-            DeclOrStmt::FunDecl(d) => {
-                let in_global_scope = self.scopes.last().unwrap().is_in_global_scope();
+            DeclOrStmt::FunDecl(decl) => {
+                let in_global_scope = self.curr_scope().is_in_global();
                 // early bind
                 if !in_global_scope {
-                    self.scopes
-                        .last_mut()
-                        .unwrap()
-                        .new_var(d.name)
-                        .map_err(|e| InterpreteError {
-                            message: e.to_string(),
-                            line: d.name_line,
-                        })?
+                    self.curr_scope_mut()
+                        .add_var(decl.name.lexeme)
+                        .map_err(|e| GrammarError::at_token(e, decl.name))?
                 }
-                let codes = {
-                    let mut c = ScopeCompiler::new(
+                let (codes, upvalue_indexes) = {
+                    self.scopes.push(Scope::new());
+                    let mut c = StmtsCompiler::new(
                         self.str_pool,
                         &mut self.scopes,
                         self.funs,
                         self.classes,
                     );
-                    c.scopes.last_mut().unwrap().new_block();
-                    for &(name, line) in d.params.iter() {
-                        let cross_fun_scope = c.scopes.last_mut().unwrap();
-                        if cross_fun_scope.is_in_global_scope() {
-                            c.chunk
-                                .add_code(OpCode::DefGlobalVar(c.str_pool.register(name)), line);
-                        } else {
-                            cross_fun_scope.new_var(name).map_err(|e| InterpreteError {
-                                message: e.to_string(),
-                                line,
-                            })?
-                        }
+                    c.new_block();
+                    for name in decl.params.iter() {
+                        c.curr_scope_mut()
+                            .add_var(name.lexeme)
+                            .map_err(|e| GrammarError::at_token(e, *name))?;
                     }
-                    c.compile_block(&d.body)?;
-                    c.chunk.add_code(OpCode::LoadNil, d.body.right_brace_line);
-                    c.chunk.add_code(OpCode::Return, d.body.right_brace_line);
-                    c.chunk.build()
+                    let block = &decl.body;
+                    for stmt in block.stmts.iter() {
+                        c.compile_decl_or_stmt(&stmt)?;
+                    }
+                    c.close_block(block.right_brace_line);
+                    c.chunk
+                        .add_code(OpCode::LoadNil, decl.body.right_brace_line);
+                    c.chunk.add_code(OpCode::Return, decl.body.right_brace_line);
+                    (
+                        c.chunk.build().into(),
+                        c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice(),
+                    )
                 };
 
                 let fun = FunPrototype {
-                    name: d.name.into(),
-                    arity: d.params.len().try_into().unwrap(),
+                    name: self.str_pool.register_rc(decl.name.lexeme),
+                    arity: decl.params.len().try_into().unwrap(),
                     codes,
-                    upvalue_indexes: self
-                        .scopes
-                        .pop()
-                        .unwrap()
-                        .upvalue_indexes
-                        .into_boxed_slice(),
+                    upvalue_indexes,
                 };
 
                 let fun_id = self.funs.len().try_into().unwrap();
                 self.funs.push(fun);
-                self.chunk.add_code(OpCode::MakeClosure(fun_id), d.fun_line);
+                self.chunk
+                    .add_code(OpCode::MakeClosure(fun_id), decl.fun_line);
                 if in_global_scope {
                     self.chunk.add_code(
-                        OpCode::DefGlobalVar(self.str_pool.register(d.name)),
-                        d.name_line,
+                        OpCode::DefGlobalVar(self.str_pool.register(decl.name.lexeme)),
+                        decl.name.line,
                     );
                 }
             }
-            DeclOrStmt::VarDecl(d) => {
-                self.compile_var_decl(d)?;
-            }
-            DeclOrStmt::Stmt(ref stmt) => {
-                self.compile_stmt(stmt)?;
-            }
-            DeclOrStmt::ClassDecl(cls) => {
-                // let id = self.classes.len().try_into().unwrap();
+            DeclOrStmt::VarDecl(d) => self.compile_var_decl(d)?,
+            DeclOrStmt::Stmt(ref stmt) => self.compile_stmt(stmt)?,
+            DeclOrStmt::ClassDecl(decl) => {
+                if let Some(super_cls) = decl.super_class {
+                    if decl.name.lexeme == super_cls.lexeme {
+                        return Err(GrammarError::at_token(
+                            "A class can't inherit from itself.",
+                            super_cls,
+                        ));
+                    }
+                    let name = super_cls;
+                    if !self.resolve_var(name)? {
+                        self.chunk.add_code(
+                            OpCode::LoadGlobalVar(self.str_pool.register(name.lexeme)),
+                            name.line,
+                        );
+                    }
+                }
+                let id = self.classes.len().try_into().unwrap();
+                let in_global_scope = self.curr_scope().is_in_global();
+                // early bind
+                if !in_global_scope {
+                    self.curr_scope_mut()
+                        .add_var(decl.name.lexeme)
+                        .map_err(|e| GrammarError::at_token(e, decl.name))?
+                }
+                let methods: Box<[Rc<FunPrototype>]> = decl
+                    .methods
+                    .iter()
+                    .map(|d| -> Result<Rc<FunPrototype>, GrammarError<'s>> {
+                        self.scopes.push(Scope::new());
+                        let mut c = StmtsCompiler::new(
+                            self.str_pool,
+                            &mut self.scopes,
+                            self.funs,
+                            self.classes,
+                        );
+                        c.new_block();
+                        c.curr_scope_mut().add_var("this").unwrap();
+                        for name in d.params.iter() {
+                            c.curr_scope_mut()
+                                .add_var(name.lexeme)
+                                .map_err(|e| GrammarError::at_token(e, *name))?;
+                        }
+                        let block = &d.body;
+                        for stmt in block.stmts.iter() {
+                            c.compile_decl_or_stmt(&stmt)?;
+                        }
+                        c.close_block(block.right_brace_line);
+                        c.chunk.add_code(OpCode::LoadNil, d.body.right_brace_line);
+                        c.chunk.add_code(OpCode::Return, d.body.right_brace_line);
+                        let upvalue_indexes =
+                            c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice();
+                        let codes = c.chunk.build().into();
+                        Ok(FunPrototype {
+                            name: self.str_pool.register_rc(d.name.lexeme),
+                            arity: d.params.len().try_into().unwrap(),
+                            codes,
+                            upvalue_indexes,
+                        }
+                        .into())
+                    })
+                    .collect::<Result<Box<[Rc<FunPrototype>]>, GrammarError<'s>>>()?;
+
                 self.classes.push(ClassPrototype {
-                    name: cls.name.into(),
-                    has_super_class: cls.super_class.is_some(),
-                    methods: todo!(),
+                    name: self.str_pool.register_rc(decl.name.lexeme),
+                    has_super: decl.super_class.is_some(),
+                    methods,
                 });
+                self.chunk.add_code(OpCode::MakeClass(id), decl.class_line);
+                if in_global_scope {
+                    self.chunk.add_code(
+                        OpCode::DefGlobalVar(self.str_pool.register(decl.name.lexeme)),
+                        decl.name.line,
+                    );
+                }
             }
         };
         Ok(())
     }
 
-    fn compile_var_decl(&mut self, v: &VarDecl<'s>) -> Result<(), InterpreteError> {
+    fn compile_var_decl(&mut self, v: &VarDecl<'s>) -> Result<(), GrammarError<'s>> {
         if let Some(init_expr) = &v.init_expr {
             self.compile_expression(init_expr)?;
         } else {
             self.chunk.add_code(OpCode::LoadNil, v.name.line);
         }
-        {
-            let name = v.name.lexeme;
-            let line = v.name.line;
-            let cross_fun_scope = self.scopes.last_mut().unwrap();
-            if cross_fun_scope.is_in_global_scope() {
-                self.chunk
-                    .add_code(OpCode::DefGlobalVar(self.str_pool.register(name)), line);
-                Ok(())
-            } else {
-                cross_fun_scope.new_var(name).map_err(|e| InterpreteError {
-                    message: e.to_string(),
-                    line,
-                })
-            }
+        let name = v.name;
+        let scope = self.scopes.last_mut().unwrap();
+        if scope.is_in_global() {
+            self.chunk.add_code(
+                OpCode::DefGlobalVar(self.str_pool.register(name.lexeme)),
+                name.line,
+            );
+            Ok(())
+        } else {
+            scope
+                .add_var(name.lexeme)
+                .map_err(|e| GrammarError::at_token(e, name))
         }
     }
 
-    fn compile_stmt(&mut self, stmt: &Statement<'s>) -> Result<(), InterpreteError> {
+    fn compile_stmt(&mut self, stmt: &Statement<'s>) -> Result<(), GrammarError<'s>> {
         match stmt {
             Statement::Expr(expr) => {
                 self.compile_expression(&expr.expr)?;
@@ -265,36 +304,44 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                 self.compile_block(b)?;
             }
             Statement::If(stmt) => {
-                let line = stmt.if_line;
                 self.compile_expression(&stmt.cond)?;
-                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, line);
+                let jover_then = JumpIfFalseC::new(&mut self.chunk, stmt.if_.line);
+                self.chunk.add_code(OpCode::Pop, stmt.if_.line);
                 self.compile_stmt(&stmt.then_branch)?;
-                if let Some((else_line, box ref else_branch)) = stmt.else_branch {
-                    let jmp = JumpPlaceholder::new(&mut self.chunk, else_line);
-                    let else_i = self.chunk.get_next_index();
-                    jif.set_target(&mut self.chunk, else_i);
+                let jover_else = JumpC::new(&mut self.chunk, stmt.if_.line);
+                jover_then.jump_forward(&mut self.chunk).map_err(|_| {
+                    GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW, stmt.then_branch_last)
+                })?;
+                self.chunk.add_code(OpCode::Pop, stmt.if_.line);
+                if let Some((_, else_branch, else_branch_last)) = &stmt.else_branch {
                     self.compile_stmt(&else_branch)?;
-                    let res_i = self.chunk.get_next_index();
-                    jmp.set_target(&mut self.chunk, res_i);
+                    // workaround for the `GrammarError::at_token`
+                    jover_else.jump_forward(&mut self.chunk).map_err(|_| {
+                        GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW, *else_branch_last)
+                    })?;
                 } else {
-                    let res_i = self.chunk.get_next_index();
-                    jif.set_target(&mut self.chunk, res_i);
+                    jover_else.jump_forward(&mut self.chunk).unwrap();
                 }
             }
             Statement::While(stmt) => {
-                let start_i = self.chunk.get_next_index();
+                let cond_i = self.chunk.get_next_index();
                 self.compile_expression(&stmt.cond)?;
-                let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, true, stmt.while_line);
+                let jover_body = JumpIfFalseC::new(&mut self.chunk, stmt.while_.line);
+                self.chunk.add_code(OpCode::Pop, stmt.while_.line);
                 self.compile_stmt(&stmt.body)?;
-                let jmp = JumpPlaceholder::new(&mut self.chunk, stmt.while_line);
-                jmp.set_target(&mut self.chunk, start_i);
-                let res_i = self.chunk.get_next_index();
-                jif.set_target(&mut self.chunk, res_i);
+                let jback = JumpC::new(&mut self.chunk, stmt.while_.line);
+                jback.jump_backward(&mut self.chunk, cond_i).map_err(|_| {
+                    GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW_IN_LOOP, stmt.body_last)
+                })?;
+                jover_body.jump_forward(&mut self.chunk).map_err(|_| {
+                    GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW_IN_LOOP, stmt.body_last)
+                })?;
+                self.chunk.add_code(OpCode::Pop, stmt.while_.line);
             }
             Statement::For(stmt) => {
                 self.scopes.last_mut().unwrap().new_block();
-                if let Some(box ref init) = stmt.init {
-                    match init {
+                if let Some(init) = &stmt.init {
+                    match init.deref() {
                         DeclOrStmt::VarDecl(l) => {
                             self.compile_var_decl(l)?;
                         }
@@ -304,11 +351,13 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                         _ => panic!("for init is not decl or expr, but {:?}", init),
                     }
                 }
-                let line = stmt.for_line;
-                let start_i = self.chunk.get_next_index();
-                let jif = if let Some(box ref cond) = stmt.cond {
+                let line = stmt.for_.line;
+                let cond_i = self.chunk.get_next_index();
+                let jover_body = if let Some(cond) = &stmt.cond {
                     self.compile_expression(cond)?;
-                    Some(JumpIfFalsePlaceholder::new(&mut self.chunk, true, line))
+                    let jover_body = JumpIfFalseC::new(&mut self.chunk, line);
+                    self.chunk.add_code(OpCode::Pop, line);
+                    Some(jover_body)
                 } else {
                     None
                 };
@@ -317,12 +366,18 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                     self.compile_expression(post)?;
                     self.chunk.add_code(OpCode::Pop, line);
                 }
-                JumpPlaceholder::new(&mut self.chunk, line).set_target(&mut self.chunk, start_i);
-                if let Some(jif) = jif {
-                    let res_i = self.chunk.get_next_index();
-                    jif.set_target(&mut self.chunk, res_i);
+                JumpC::new(&mut self.chunk, line)
+                    .jump_backward(&mut self.chunk, cond_i)
+                    .map_err(|_| {
+                        GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW_IN_LOOP, stmt.body_last)
+                    })?;
+                if let Some(jif) = jover_body {
+                    jif.jump_forward(&mut self.chunk).map_err(|_| {
+                        GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW_IN_LOOP, stmt.body_last)
+                    })?;
+                    self.chunk.add_code(OpCode::Pop, line);
                 }
-                let vars = self.scopes.last_mut().unwrap().end_block();
+                let vars = self.scopes.last_mut().unwrap().close_block();
                 assert!(vars.len() <= 1);
                 for &captured in vars.iter() {
                     self.chunk.add_code(
@@ -336,24 +391,30 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                 }
             }
             Statement::Return(r) => {
+                if self.scopes.len() < 2 {
+                    return Err(GrammarError::at_token(
+                        "Can't return from top-level code.",
+                        r.return_,
+                    ));
+                }
                 if let Some(value) = &r.value {
                     self.compile_expression(value)?;
-                    self.chunk.add_code(OpCode::Return, r.return_line);
+                    self.chunk.add_code(OpCode::Return, r.return_.line);
                 } else {
-                    self.chunk.add_code(OpCode::LoadNil, r.return_line);
-                    self.chunk.add_code(OpCode::Return, r.return_line);
+                    self.chunk.add_code(OpCode::LoadNil, r.return_.line);
+                    self.chunk.add_code(OpCode::Return, r.return_.line);
                 }
             }
         };
         Ok(())
     }
 
-    fn compile_block(&mut self, block: &BlockStmt<'s>) -> Result<(), InterpreteError> {
+    fn compile_block(&mut self, block: &BlockStmt<'s>) -> Result<(), GrammarError<'s>> {
         self.scopes.last_mut().unwrap().new_block();
         for stmt in block.stmts.iter() {
             self.compile_decl_or_stmt(&stmt)?;
         }
-        let vars = self.scopes.last_mut().unwrap().end_block();
+        let vars = self.scopes.last_mut().unwrap().close_block();
         for &captured in vars.iter().rev() {
             self.chunk.add_code(
                 if captured {
@@ -366,13 +427,13 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
         }
         Ok(())
     }
-    fn compile_expression(&'_ mut self, expr: &'_ Expression<'s>) -> Result<(), InterpreteError> {
+    fn compile_expression(&'_ mut self, expr: &'_ Expression<'s>) -> Result<(), GrammarError<'s>> {
         match &expr {
             Expression::Literal(l) => {
                 let line = l.line;
                 match &l.value {
-                    LiteralValue::Number(n) => {
-                        self.chunk.add_code(OpCode::LoadNumber(*n), line);
+                    &LiteralValue::Number(n) => {
+                        self.chunk.add_code(OpCode::LoadNumber(n), line);
                     }
                     LiteralValue::String(s) => {
                         self.chunk.add_const_str(&s, line);
@@ -389,34 +450,37 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                 };
             }
             Expression::Unary(u) => {
-                let op_code = match u.op {
+                let op_code = match u.op.ttype {
                     TokenType::Minus => (OpCode::Negate),
                     TokenType::Bang => (OpCode::Not),
-                    _ => unreachable!(),
+                    _ => panic!("unknown unary op={:?}", u.op),
                 };
                 self.compile_expression(&u.right)?;
-                self.chunk.add_code(op_code, u.op_line);
+                self.chunk.add_code(op_code, u.op.line);
             }
             Expression::Binary(b) => {
                 self.compile_expression(&b.left)?;
-                let line = b.op_line;
-                match b.op {
+                let line = b.op.line;
+                match b.op.ttype {
                     TokenType::And => {
-                        let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, false, line);
+                        let jover_rhs = JumpIfFalseC::new(&mut self.chunk, line);
+                        self.chunk.add_code(OpCode::Pop, line);
                         self.compile_expression(&b.right)?;
-                        let jres = JumpPlaceholder::new(&mut self.chunk, line);
-                        let res_i = self.chunk.get_next_index();
-                        jif.set_target(&mut self.chunk, res_i);
-                        jres.set_target(&mut self.chunk, res_i);
+                        jover_rhs
+                            .jump_forward(&mut self.chunk)
+                            .map_err(|_| GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW, b.op))?;
                     }
                     TokenType::Or => {
-                        let jif = JumpIfFalsePlaceholder::new(&mut self.chunk, false, line);
-                        let jres = JumpPlaceholder::new(&mut self.chunk, line);
-                        let rhs_i = self.chunk.get_next_index();
-                        jif.set_target(&mut self.chunk, rhs_i);
+                        let jto_rhs = JumpIfFalseC::new(&mut self.chunk, line);
+                        let jover_rhs = JumpC::new(&mut self.chunk, line);
+                        jto_rhs
+                            .jump_forward(&mut self.chunk)
+                            .map_err(|_| GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW, b.op))?;
+                        self.chunk.add_code(OpCode::Pop, line);
                         self.compile_expression(&b.right)?;
-                        let res_i = self.chunk.get_next_index();
-                        jres.set_target(&mut self.chunk, res_i);
+                        jover_rhs
+                            .jump_forward(&mut self.chunk)
+                            .map_err(|_| GrammarError::at_token(ERR_JUMP_OFFSET_OVERFLOW, b.op))?;
                     }
                     TokenType::EqualEqual => {
                         self.compile_expression(&b.right)?;
@@ -466,40 +530,49 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
             }
             Expression::Grouping(g) => self.compile_expression(&g)?,
             &Expression::Variable(v) => {
-                if let Some(idx) = self.scopes.last_mut().unwrap().position(v.name) {
-                    self.chunk.add_code(OpCode::LoadLocalVar(idx), v.line);
-                } else if let Some(idx) =
-                    resolve_upvalue(self.scopes, self.scopes.len() - 1, v.name)
-                {
-                    self.chunk.add_code(OpCode::LoadUpvalue(idx), v.line);
-                } else {
+                let name = v.name;
+                if !self.resolve_var(name)? {
                     self.chunk.add_code(
-                        OpCode::LoadGlobalVar(self.str_pool.register(v.name)),
-                        v.line,
+                        OpCode::LoadGlobalVar(self.str_pool.register(name.lexeme)),
+                        name.line,
                     );
                 }
             }
-            Expression::Assignment(a) => {
-                self.compile_expression(&a.expr)?;
-                match &a.lvalue {
-                    crate::ast::expression::LValue::Variable(v) => {
-                        let var_name = v.name;
-                        if let Some(idx) = self.scopes.last().unwrap().position(var_name) {
-                            self.chunk.add_code(OpCode::SetLobalVar(idx), a.op_line);
-                        } else if let Some(idx) =
-                            resolve_upvalue(self.scopes, self.scopes.len() - 1, var_name)
-                        {
-                            self.chunk.add_code(OpCode::SetUpvalue(idx), a.op_line);
-                        } else {
-                            self.chunk.add_code(
-                                OpCode::SetGlobalVar(self.str_pool.register(var_name)),
-                                a.op_line,
-                            );
-                        }
-                    }
-                    crate::ast::expression::LValue::Get(_) => todo!(),
+            Expression::This(t) => {
+                if !self.resolve_var(t.this)? {
+                    return Err(GrammarError::at_token(
+                        "Can't use 'this' outside of a class.",
+                        t.this,
+                    ));
                 }
             }
+            Expression::Assignment(a) => match &a.lvalue {
+                crate::ast::expression::LValue::Variable(v) => {
+                    self.compile_expression(&a.expr)?;
+                    let name = v.name;
+                    if let Some(idx) = self.curr_scope().position(name.lexeme) {
+                        self.chunk.add_code(OpCode::SetLobalVar(idx), a.op_line);
+                    } else if let Some(idx) =
+                        resolve_upvalue(self.scopes, self.scopes.len() - 1, name.lexeme)
+                            .map_err(|e| GrammarError::at_token(e, name))?
+                    {
+                        self.chunk.add_code(OpCode::SetUpvalue(idx), a.op_line);
+                    } else {
+                        self.chunk.add_code(
+                            OpCode::SetGlobalVar(self.str_pool.register(name.lexeme)),
+                            a.op_line,
+                        );
+                    }
+                }
+                crate::ast::expression::LValue::Get(g) => {
+                    self.compile_expression(&g.expr)?;
+                    self.compile_expression(&a.expr)?;
+                    self.chunk.add_code(
+                        OpCode::SetProp(self.str_pool.register(g.name.lexeme)),
+                        a.op_line,
+                    );
+                }
+            },
             Expression::Call(c) => {
                 self.compile_expression(&c.callee)?;
                 for ele in c.args.iter() {
@@ -511,10 +584,32 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
                 );
             }
             Expression::Super(_) => todo!(),
-            Expression::This(_) => todo!(),
-            Expression::Get(_) => todo!(),
+            Expression::Get(g) => {
+                self.compile_expression(&g.expr)?;
+                self.chunk.add_code(
+                    OpCode::GetProp(self.str_pool.register(g.name.lexeme)),
+                    g.dot.line,
+                );
+            }
         }
         Ok(())
+    }
+
+    fn resolve_var(&mut self, name: Token<'s>) -> Result<bool, GrammarError<'s>> {
+        Ok(
+            if let Some(idx) = self.curr_scope_mut().position(name.lexeme) {
+                self.chunk.add_code(OpCode::LoadLocalVar(idx), name.line);
+                true
+            } else if let Some(idx) =
+                resolve_upvalue(self.scopes, self.scopes.len() - 1, name.lexeme)
+                    .map_err(|e| GrammarError::at_token(e, name))?
+            {
+                self.chunk.add_code(OpCode::LoadUpvalue(idx), name.line);
+                true
+            } else {
+                false
+            },
+        )
     }
 
     fn curr_scope(&self) -> &Scope<'s> {
@@ -523,85 +618,209 @@ impl<'p, 's, 'o> ScopeCompiler<'p, 's, 'o> {
     fn curr_scope_mut(&mut self) -> &mut Scope<'s> {
         self.scopes.last_mut().unwrap()
     }
+
+    fn new_block(&mut self) {
+        self.curr_scope_mut().new_block()
+    }
+    fn close_block(&mut self, src_line: u32) {
+        for &captured in self.curr_scope_mut().close_block().iter().rev() {
+            self.chunk.add_code(
+                if captured {
+                    OpCode::PopMaybeUpvalue
+                } else {
+                    OpCode::Pop
+                },
+                src_line,
+            );
+        }
+    }
 }
 
-fn resolve_upvalue<'s>(scopes: &'_ mut Vec<Scope<'s>>, curr: usize, name: &'s str) -> Option<u8> {
-    if curr > 0 {
-        let outer = curr - 1;
-        if let Some(idx) = scopes[outer].try_capture(name) {
-            Some(UpvalueIndex::Local(idx))
-        } else if let Some(idx) = resolve_upvalue(scopes, outer, name) {
-            Some(UpvalueIndex::Upvalue(idx))
-        } else {
-            None
-        }
-    } else {
-        None
+fn resolve_upvalue<'s>(
+    scopes: &'_ mut Vec<Scope<'s>>,
+    curr: usize,
+    name: &'s str,
+) -> Result<Option<u8>, &'static str> {
+    if curr <= 0 {
+        return Ok(None);
     }
-    .map(|v| scopes[curr].register_upvalue(v))
+    let outer = curr - 1;
+    let v = if let Some(idx) = scopes[outer].try_capture(name) {
+        UpvalueIndex::Local(idx)
+    } else if let Some(idx) = resolve_upvalue(scopes, outer, name)? {
+        UpvalueIndex::Upvalue(idx)
+    } else {
+        return Ok(None);
+    };
+
+    scopes[curr].register_upvalue(v).map(|no| Some(no))
+}
+
+struct JumpC {
+    jump_i: usize,
+}
+
+impl JumpC {
+    fn new(chunk: &mut Chunk, src_line: u32) -> Self {
+        let jump_i = chunk.get_next_index();
+        chunk.add_code(OpCode::Jump(i16::MAX), src_line);
+        Self { jump_i }
+    }
+
+    fn jump_forward(self, chunk: &mut Chunk) -> Result<(), TryFromIntError> {
+        let target_i = chunk.get_next_index();
+        let jump_i = self.jump_i;
+        assert!(jump_i < target_i);
+        let offset = (target_i - jump_i).try_into()?;
+        chunk.set(jump_i, OpCode::Jump(offset));
+        Ok(())
+    }
+    fn jump_backward(self, chunk: &mut Chunk, target_i: usize) -> Result<(), TryFromIntError> {
+        let jump_i = self.jump_i;
+        assert!(jump_i > target_i);
+        let offset: i16 = (jump_i - target_i).try_into()?;
+        chunk.set(jump_i, OpCode::Jump(offset.neg()));
+        Ok(())
+    }
+}
+
+struct JumpIfFalseC {
+    jump_i: usize,
+}
+
+impl JumpIfFalseC {
+    fn new(chunk: &mut Chunk, src_line: u32) -> Self {
+        let jump_i = chunk.get_next_index();
+        chunk.add_code(OpCode::JumpIfFalse(i16::MAX), src_line);
+        Self { jump_i }
+    }
+
+    fn jump_forward(self, chunk: &mut Chunk) -> Result<(), TryFromIntError> {
+        let target_i = chunk.get_next_index();
+        let jump_i = self.jump_i;
+        assert!(jump_i < target_i);
+        let offset = (target_i - jump_i).try_into()?;
+        chunk.set(self.jump_i, OpCode::JumpIfFalse(offset));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test {
 
+    use std::ops::Deref;
+
     use crate::ast::parse_source;
 
     use super::*;
-    #[test]
-    fn test_compile_program() {
-        let program = parse_source("print 1;".as_bytes()).unwrap();
-        let str_pool = StrPool::new();
-        println!("{}", compile(&program, &str_pool).unwrap());
-    }
 
     #[test]
-    fn test_str_pool() {
+    fn test_resolve_upvalue() {
+        let mut s1 = Scope::new();
+        s1.new_block();
+        s1.add_var("a").unwrap();
+        let mut vec = vec![s1, Scope::new(), Scope::new()];
+        let upvalue_no = resolve_upvalue(&mut vec, 2, "a").unwrap();
+        assert_eq!(upvalue_no, Some(0));
+        assert_eq!(
+            vec.last().unwrap().upvalue_indexes[0],
+            UpvalueIndex::Upvalue(0)
+        );
+    }
+
+    #[test]
+    fn test_pop_open_upvalue() {
         let str_pool = StrPool::new();
-        let s1 = str_pool.register("hello");
-        let s2 = str_pool.register("hello");
-        assert_eq!(s1, s2);
+        let Module { main, funs, .. } = compile(
+            &parse_source(
+                r#"
+{
+    var a = 1;
+    fun f() {
+        print a;
     }
 }
-
-struct JumpPlaceholder {
-    jump_i: u16,
-}
-
-impl JumpPlaceholder {
-    fn new(chunk: &mut Chunk, src_line: u32) -> Self {
-        let jump_i = chunk.get_next_index();
-        chunk.add_code(OpCode::Jump(u16::MAX), src_line);
-        Self { jump_i }
-    }
-    fn set_target(&self, chunk: &mut Chunk, target_i: u16) {
-        chunk.set(self.jump_i, OpCode::Jump(target_i));
-    }
-}
-
-struct JumpIfFalsePlaceholder {
-    jump_i: u16,
-    pop_value: bool,
-}
-
-impl JumpIfFalsePlaceholder {
-    fn new(chunk: &mut Chunk, pop_value: bool, src_line: u32) -> Self {
-        let jump_i = chunk.get_next_index();
-        chunk.add_code(
-            OpCode::JumpIfFalse(JumpIfParam {
-                pop_value,
-                target: u16::MAX,
-            }),
-            src_line,
+        "#
+                .as_bytes(),
+            )
+            .unwrap(),
+            &str_pool,
+        )
+        .unwrap();
+        assert_eq!(
+            main.codes,
+            [
+                OpCode::LoadNumber(1.),
+                OpCode::MakeClosure(0),
+                OpCode::Pop,
+                OpCode::PopMaybeUpvalue,
+                OpCode::Return,
+            ]
+            .into()
         );
-        Self { jump_i, pop_value }
-    }
-    fn set_target(&self, chunk: &mut Chunk, target: u16) {
-        chunk.set(
-            self.jump_i,
-            OpCode::JumpIfFalse(JumpIfParam {
-                pop_value: self.pop_value,
-                target,
-            }),
+        let f = &funs[0];
+        assert_eq!(f.name.deref(), "f");
+        assert_eq!(f.upvalue_indexes, [UpvalueIndex::Local(0)].into());
+        assert_eq!(
+            f.codes.codes,
+            [
+                OpCode::LoadUpvalue(0),
+                OpCode::Print,
+                OpCode::LoadNil,
+                OpCode::Return,
+            ]
+            .into()
         );
     }
+    #[test]
+    fn test_mix_if_and_logic_op() {
+        let str_pool = StrPool::new();
+        let Module { main, .. } = compile(
+            &parse_source(
+                r#"
+{
+    if ((1 < 2 and 4 < 3) or true) {
+        print 1;
+    } else {
+        print 0;
+    }
 }
+                "#
+                .as_bytes(),
+            )
+            .unwrap(),
+            &str_pool,
+        )
+        .unwrap();
+        assert_eq!(
+            main.codes,
+            [
+                OpCode::LoadNumber(1.),
+                OpCode::LoadNumber(2.),
+                OpCode::Less,
+                OpCode::JumpIfFalse(5), // and
+                OpCode::Pop,
+                OpCode::LoadNumber(4.),
+                OpCode::LoadNumber(3.),
+                OpCode::Less,
+                OpCode::JumpIfFalse(2), // or
+                OpCode::Jump(3),
+                OpCode::Pop,
+                OpCode::LoadTrue,
+                OpCode::JumpIfFalse(5), // if
+                OpCode::Pop,
+                OpCode::LoadNumber(1.),
+                OpCode::Print,
+                OpCode::Jump(4),
+                OpCode::Pop, // else
+                OpCode::LoadNumber(0.),
+                OpCode::Print,
+                OpCode::Return,
+            ]
+            .into()
+        );
+    }
+}
+
+const ERR_JUMP_OFFSET_OVERFLOW: &str = "Too much code to jump over.";
+const ERR_JUMP_OFFSET_OVERFLOW_IN_LOOP: &str = "Loop body too large.";

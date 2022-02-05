@@ -10,7 +10,7 @@ use super::{
         Variable,
     },
     statement::{
-        BlockStmt, ClassDecl, DeclOrStmt, ExprStmt, ForStmt, FunDecl, IfStmt, PrintStmt, Program,
+        BlockStmt, ClassDecl, DeclOrStmt, ExprStmt, File, ForStmt, FunDecl, IfStmt, PrintStmt,
         ReturnStmt, Statement, VarDecl, WhileStmt,
     },
     token::{Token, TokenType},
@@ -27,7 +27,7 @@ enum FunType {
     Method,
 }
 
-pub fn parse<'a>(tokens: Vec<Token<'a>>) -> Result<Program<'a>, Vec<GrammarError<'a>>> {
+pub fn parse<'a>(tokens: Vec<Token<'a>>) -> Result<File<'a>, Vec<GrammarError<'a>>> {
     let mut parser = Parser {
         tokens,
         current: 0,
@@ -40,7 +40,7 @@ pub fn parse<'a>(tokens: Vec<Token<'a>>) -> Result<Program<'a>, Vec<GrammarError
         }
     }
     if parser.errs.is_empty() {
-        Ok(Program {
+        Ok(File {
             statements,
             eof_line: parser.peek().line,
         })
@@ -76,14 +76,10 @@ impl<'a> Parser<'a> {
     }
 
     fn class_declaration(&mut self) -> Result<ClassDecl<'a>, GrammarError<'a>> {
-        let name = self
-            .consume(TokenType::Identifier, "Expect class name.")?
-            .lexeme;
+        let class_line = self.previous().line;
+        let name = self.consume(TokenType::Identifier, "Expect class name.")?;
         let super_class = if self.match_t(TokenType::Less) {
-            Some(
-                self.consume(TokenType::Identifier, "Expect superclass name.")?
-                    .lexeme,
-            )
+            Some(self.consume(TokenType::Identifier, "Expect superclass name.")?)
         } else {
             None
         };
@@ -94,6 +90,7 @@ impl<'a> Parser<'a> {
         }
         self.consume(TokenType::RightBrace, "Expect '}' after class body.")?;
         Ok(ClassDecl {
+            class_line,
             name,
             super_class,
             methods,
@@ -119,7 +116,7 @@ impl<'a> Parser<'a> {
     }
 
     fn for_statement(&mut self) -> Result<ForStmt<'a>, GrammarError<'a>> {
-        let for_line = self.previous().line;
+        let for_ = self.previous();
         self.consume(TokenType::LeftParen, "Expect '(' after 'for'.")?;
         let init = if self.match_t(TokenType::Semicolon) {
             None
@@ -145,31 +142,38 @@ impl<'a> Parser<'a> {
         };
         self.consume(TokenType::RightParen, "Expect ')' after for clauses.")?;
         let body = self.statement()?;
+        let body_last = self.previous();
         Ok(ForStmt {
-            for_line,
+            for_,
             init: init.map(|d| d.into()),
             cond: cond.map(|e| e.into()),
             post: post.map(|e| e.into()),
             body: body.into(),
+            body_last,
         })
     }
 
     fn if_statement(&mut self) -> Result<IfStmt<'a>, GrammarError<'a>> {
-        let if_line = self.previous().line;
+        let if_ = self.previous();
         self.consume(TokenType::LeftParen, "Expect '(' after 'if'.")?;
         let cond = self.expression()?;
         self.consume(TokenType::RightParen, "Expect ')' after if condition.")?;
 
         let then_branch = self.statement()?;
+        let then_branch_last = self.previous();
         let else_branch = if self.match_t(TokenType::Else) {
-            Some((self.previous().line, self.statement()?.into()))
+            let else_ = self.previous();
+            let branch = self.statement()?;
+            let branch_last = self.previous();
+            Some((else_, branch.into(), branch_last))
         } else {
             None
         };
         Ok(IfStmt {
-            if_line,
+            if_,
             cond: cond.into(),
             then_branch: then_branch.into(),
+            then_branch_last,
             else_branch,
         })
     }
@@ -181,7 +185,7 @@ impl<'a> Parser<'a> {
         Ok(PrintStmt { print_line, expr })
     }
     fn return_statement(&mut self) -> Result<ReturnStmt<'a>, GrammarError<'a>> {
-        let return_line = self.previous().line;
+        let return_ = self.previous();
         let value = if !self.check(TokenType::Semicolon) {
             Some(self.expression()?)
         } else {
@@ -189,7 +193,7 @@ impl<'a> Parser<'a> {
         };
         self.consume(TokenType::Semicolon, "Expect ';' after return value.")?;
         Ok(ReturnStmt {
-            return_line,
+            return_,
             value: value.map(|e| e.into()),
         })
     }
@@ -211,16 +215,18 @@ impl<'a> Parser<'a> {
     }
 
     fn while_statement(&mut self) -> Result<WhileStmt<'a>, GrammarError<'a>> {
-        let while_line = self.previous().line;
+        let while_ = self.previous();
         self.consume(TokenType::LeftParen, "Expect '(' after 'while'.")?;
         let cond = self.expression()?;
         self.consume(TokenType::RightParen, "Expect ')' after condition.")?;
         let body = self.statement()?;
+        let body_last = self.previous();
 
         Ok(WhileStmt {
-            while_line,
+            while_,
             cond: cond.into(),
             body: body.into(),
+            body_last,
         })
     }
 
@@ -262,7 +268,7 @@ impl<'a> Parser<'a> {
                 }
 
                 let token = self.consume(TokenType::Identifier, "Expect parameter name.")?;
-                params.push((token.lexeme, token.line));
+                params.push(token);
                 if !self.match_t(TokenType::Comma) {
                     break;
                 }
@@ -270,12 +276,13 @@ impl<'a> Parser<'a> {
         }
         self.consume(TokenType::RightParen, "Expect ')' after parameters.")?;
 
-        self.consume(TokenType::LeftBrace, err_function_left_bracket)?;
+        if let Err(err) = self.consume(TokenType::LeftBrace, err_function_left_bracket) {
+            self.errs.push(err);
+        }
         let body = self.block()?;
         Ok(FunDecl {
             fun_line,
-            name: name.lexeme,
-            name_line: name.line,
+            name,
             params,
             body,
         })
@@ -337,8 +344,7 @@ impl<'a> Parser<'a> {
             let right = self.and();
             expr = Expression::Binary(Binary {
                 left: Box::new(expr),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: Box::new(right?),
             });
         }
@@ -353,8 +359,7 @@ impl<'a> Parser<'a> {
             let right = self.equality()?;
             left = Expression::Binary(Binary {
                 left: left.into(),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             });
         }
@@ -370,8 +375,7 @@ impl<'a> Parser<'a> {
             let right = self.comparison()?;
             left = Expression::Binary(Binary {
                 left: left.into(),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             })
         }
@@ -390,8 +394,7 @@ impl<'a> Parser<'a> {
             let right = self.term()?;
             left = Expression::Binary(Binary {
                 left: left.into(),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             })
         }
@@ -406,8 +409,7 @@ impl<'a> Parser<'a> {
             let right = self.factor()?;
             left = Expression::Binary(Binary {
                 left: left.into(),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             });
         }
@@ -423,8 +425,7 @@ impl<'a> Parser<'a> {
             let right = self.unary()?;
             left = Expression::Binary(Binary {
                 left: left.into(),
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             })
         }
@@ -437,8 +438,7 @@ impl<'a> Parser<'a> {
             let op = self.previous();
             let right = self.unary()?;
             return Ok(Expression::Unary(Unary {
-                op: op.ttype,
-                op_line: op.line,
+                op,
                 right: right.into(),
             }));
         }
@@ -480,13 +480,12 @@ impl<'a> Parser<'a> {
             if self.match_t(TokenType::LeftParen) {
                 expr = self.finish_call(expr)?;
             } else if self.match_t(TokenType::Dot) {
-                let dot_line = self.previous().line;
-                let name = self
-                    .consume(TokenType::Identifier, "Expect property name after '.'.")?
-                    .lexeme;
+                let dot = self.previous();
+                let name =
+                    self.consume(TokenType::Identifier, "Expect property name after '.'.")?;
                 expr = Expression::Get(Get {
                     expr: expr.into(),
-                    dot_line,
+                    dot,
                     name,
                 });
             } else {
@@ -536,13 +535,11 @@ impl<'a> Parser<'a> {
             Ok(Expression::Super(Super { super_line, method }))
         } else if self.match_t(TokenType::This) {
             Ok(Expression::This(This {
-                this_line: self.previous().line,
+                this: self.previous(),
             }))
         } else if self.match_t(TokenType::Identifier) {
-            let id = self.previous();
             Ok(Expression::Variable(Variable {
-                name: id.lexeme,
-                line: id.line,
+                name: self.previous(),
             }))
         } else if self.match_t(TokenType::LeftParen) {
             let expr = self.expression()?;

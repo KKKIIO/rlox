@@ -10,17 +10,17 @@ pub enum DeclOrStmt<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct ClassDecl<'a> {
-    pub name: &'a str,
-    pub super_class: Option<&'a str>,
+    pub class_line: u32,
+    pub name: Token<'a>,
+    pub super_class: Option<Token<'a>>,
     pub methods: Vec<FunDecl<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct FunDecl<'a> {
     pub fun_line: u32,
-    pub name: &'a str,
-    pub name_line: u32,
-    pub params: Vec<(&'a str, u32)>,
+    pub name: Token<'a>,
+    pub params: Vec<Token<'a>>,
     pub body: BlockStmt<'a>,
 }
 
@@ -61,36 +61,39 @@ pub struct BlockStmt<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct IfStmt<'a> {
-    pub if_line: u32,
+    pub if_: Token<'a>,
     pub cond: Expression<'a>,
     pub then_branch: Box<Statement<'a>>,
-    pub else_branch: Option<(u32, Box<Statement<'a>>)>,
+    pub then_branch_last: Token<'a>,
+    pub else_branch: Option<(Token<'a>, Box<Statement<'a>>, Token<'a>)>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ForStmt<'a> {
-    pub for_line: u32,
+    pub for_: Token<'a>,
     pub init: Option<Box<DeclOrStmt<'a>>>,
     pub cond: Option<Box<Expression<'a>>>,
     pub post: Option<Box<Expression<'a>>>,
     pub body: Box<Statement<'a>>,
+    pub body_last: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct WhileStmt<'a> {
-    pub while_line: u32,
+    pub while_: Token<'a>,
     pub cond: Box<Expression<'a>>,
     pub body: Box<Statement<'a>>,
+    pub body_last: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ReturnStmt<'a> {
-    pub return_line: u32,
+    pub return_: Token<'a>,
     pub value: Option<Expression<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Program<'a> {
+pub struct File<'a> {
     pub statements: Vec<DeclOrStmt<'a>>,
     pub eof_line: u32,
 }

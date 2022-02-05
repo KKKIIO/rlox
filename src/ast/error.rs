@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use crate::ast::token::TokenType;
+
 use super::token::Token;
 
 #[derive(Debug, PartialEq)]
@@ -29,11 +31,21 @@ impl<'a> GrammarError<'a> {
 impl<'a> Display for GrammarError<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match &self.at {
-            Some(at) => write!(
-                f,
-                "[line {}] Error at '{}': {}",
-                self.line, at.lexeme, self.kind
-            ),
+            Some(at) => {
+                if at.ttype == TokenType::Eof {
+                    write!(
+                        f,
+                        "[line {}] Error at end: {}",
+                        self.line, self.kind
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[line {}] Error at '{}': {}",
+                        self.line, at.lexeme, self.kind
+                    )
+                }
+            }
             None => write!(f, "[line {}] Error: {}", self.line, self.kind),
         }
     }
