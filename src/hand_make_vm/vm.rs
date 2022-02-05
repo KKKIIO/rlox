@@ -10,7 +10,12 @@ use gc::{Finalize, Gc, GcCell, Trace};
 use gpoint::GPoint;
 
 use super::chunk::Codes;
-use super::{error::InterpreteError, str_pool::StrPool};
+use super::str_pool::StrPool;
+
+pub struct InterpreteError {
+    pub message: String,
+    pub line: u32,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum OpCode {
@@ -103,24 +108,6 @@ impl PartialEq for Value {
     }
 }
 
-impl Value {
-    fn as_closure(&self) -> Option<&Gc<Closure>> {
-        if let Self::Closure(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-
-    fn as_method(&self) -> Option<&Gc<Method>> {
-        if let Self::Method(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-}
-
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -128,7 +115,7 @@ impl Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Number(n) => write!(f, "{}", GPoint(*n)),
             Value::String(s) => write!(f, "{}", s),
-            Value::NativeFunc(nf) => write!(f, "<native fn>"),
+            Value::NativeFunc(_) => write!(f, "<native fn>"),
             Value::Closure(c) => write!(f, "<fn {}>", c.proto.name),
             Value::Method(m) => write!(f, "<fn {}>", m.fun.name),
             Value::Class(c) => write!(f, "{}", c.proto.name),
@@ -215,7 +202,10 @@ impl Callable for Closure {
         &self.upvalues[i as usize]
     }
     fn ref_from_value(v: &Value) -> Option<&Self> {
-        v.as_closure().map(|c| c.borrow())
+        match v {
+            Value::Closure(c) => Some(c.borrow()),
+            _ => None,
+        }
     }
 }
 impl Callable for Method {
@@ -226,7 +216,10 @@ impl Callable for Method {
         &self.upvalues[i as usize]
     }
     fn ref_from_value(v: &Value) -> Option<&Self> {
-        v.as_method().map(|m| m.borrow())
+        match v {
+            Value::Method(m) => Some(m.borrow()),
+            _ => None,
+        }
     }
 }
 
@@ -405,10 +398,11 @@ impl<'p> VM<'p> {
                 }
                 &OpCode::LoadUpvalue(i) => {
                     let call_frame = call_frames.last().unwrap();
-                    let upvalue: &Gc<GcCell<Upvalue>> = &stack[call_frame.stack_base - 1]
-                        .as_closure()
-                        .unwrap()
-                        .upvalues[i as usize];
+                    let upvalue: &Gc<GcCell<Upvalue>> = match &stack[call_frame.stack_base - 1] {
+                        Value::Closure(c) => &c.upvalues[i as usize],
+                        Value::Method(m) => &m.upvalues[i as usize],
+                        _ => panic!("LoadUpvalue: stack[stack_base - 1] is not closure or method"),
+                    };
                     let v = match upvalue.deref().borrow().deref() {
                         &Upvalue::Open(i) => stack[i].clone(),
                         Upvalue::Closed(v) => v.clone(),
@@ -418,12 +412,12 @@ impl<'p> VM<'p> {
                 &OpCode::SetUpvalue(i) => {
                     let value = stack.last().unwrap().clone();
                     let call_frame = call_frames.last().unwrap();
-                    let closure = stack[call_frame.stack_base - 1]
-                        .as_closure()
-                        .unwrap()
-                        .clone();
-                    let upvalue: &GcCell<Upvalue> = &(closure.upvalues[i as usize]);
-                    let open = upvalue.borrow().as_open().copied();
+                    let upvalue: &Gc<GcCell<Upvalue>> = match &stack[call_frame.stack_base - 1] {
+                        Value::Closure(c) => &c.upvalues[i as usize],
+                        Value::Method(m) => &m.upvalues[i as usize],
+                        _ => panic!("LoadUpvalue: stack[stack_base - 1] is not closure or method"),
+                    };
+                    let open = upvalue.deref().borrow().as_open().copied();
                     match open {
                         Some(i) => {
                             stack[i] = value;
@@ -593,7 +587,6 @@ impl<'p> VM<'p> {
                         Value::Method(method) => {
                             check_arity(args_count, method.fun.arity)
                                 .map_err(|e| execute_state.err(e))?;
-                            stack.insert(args_start, Value::Object(method.obj.clone()));
                             let (return_codes, return_ip) =
                                 execute_state.set_fun_codes(method.fun.codes.clone(), 0);
                             call_frames.push(CallFrame {
@@ -601,6 +594,7 @@ impl<'p> VM<'p> {
                                 return_ip,
                                 return_codes,
                             });
+                            stack.push(Value::Object(method.obj.clone()));
                         }
                         Value::Class(cls) => {
                             let obj = Gc::new(GcCell::new(Object {

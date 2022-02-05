@@ -52,19 +52,6 @@ impl<'s> Scope<'s> {
             upvalue_indexes: Vec::new(),
         }
     }
-    fn register_upvalue(&mut self, idx: UpvalueIndex) -> Result<u8, &'static str> {
-        if let Some(i) = self.upvalue_indexes.iter().position(|&x| x == idx) {
-            Ok(i.try_into().unwrap())
-        } else {
-            let i = self
-                .upvalue_indexes
-                .len()
-                .try_into()
-                .map_err(|_| "Too many closure variables in function.")?;
-            self.upvalue_indexes.push(idx);
-            Ok(i)
-        }
-    }
     fn is_in_global(&self) -> bool {
         self.var_count_per_block.is_empty()
     }
@@ -106,6 +93,19 @@ impl<'s> Scope<'s> {
             self.vars[i as usize].1 = true;
         }
         position
+    }
+    fn register_upvalue(&mut self, idx: UpvalueIndex) -> Result<u8, &'static str> {
+        if let Some(i) = self.upvalue_indexes.iter().position(|&x| x == idx) {
+            Ok(i.try_into().unwrap())
+        } else {
+            let i = self
+                .upvalue_indexes
+                .len()
+                .try_into()
+                .map_err(|_| "Too many closure variables in function.")?;
+            self.upvalue_indexes.push(idx);
+            Ok(i)
+        }
     }
 }
 
@@ -206,7 +206,6 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                         );
                     }
                 }
-                let id = self.classes.len().try_into().unwrap();
                 let in_global_scope = self.curr_scope().is_in_global();
                 // early bind
                 if !in_global_scope {
@@ -226,12 +225,12 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                             self.classes,
                         );
                         c.new_block();
-                        c.curr_scope_mut().add_var("this").unwrap();
                         for name in d.params.iter() {
                             c.curr_scope_mut()
                                 .add_var(name.lexeme)
                                 .map_err(|e| GrammarError::at_token(e, *name))?;
                         }
+                        c.curr_scope_mut().add_var("this").unwrap();
                         let block = &d.body;
                         for stmt in block.stmts.iter() {
                             c.compile_decl_or_stmt(&stmt)?;
@@ -252,6 +251,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     })
                     .collect::<Result<Box<[Rc<FunPrototype>]>, GrammarError<'s>>>()?;
 
+                let id = self.classes.len().try_into().unwrap();
                 self.classes.push(ClassPrototype {
                     name: self.str_pool.register_rc(decl.name.lexeme),
                     has_super: decl.super_class.is_some(),
