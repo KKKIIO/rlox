@@ -25,7 +25,13 @@ pub fn compile<'s>(
     let mut funs = Vec::new();
     let mut classes = Vec::new();
     let mut scopes = vec![Scope::new()];
-    let mut c = StmtsCompiler::new(str_pool, &mut scopes, &mut funs, &mut classes);
+    let mut c = StmtsCompiler::new(
+        CompileType::Script,
+        str_pool,
+        &mut scopes,
+        &mut funs,
+        &mut classes,
+    );
     for stmt in program.statements.iter() {
         c.compile_decl_or_stmt(&stmt)?;
     }
@@ -65,7 +71,7 @@ impl<'s> Scope<'s> {
             .map(|(_, captured)| captured)
             .collect()
     }
-    fn add_var(&mut self, name: &'s str) -> Result<(), &'static str> {
+    fn add_local(&mut self, name: &'s str) -> Result<(), &'static str> {
         if self.vars.len() >= u8::MAX as usize {
             return Err("Too many local variables in function.");
         }
@@ -109,7 +115,15 @@ impl<'s> Scope<'s> {
     }
 }
 
+enum CompileType {
+    Script,
+    Fun,
+    Method,
+    Initializer,
+}
+
 struct StmtsCompiler<'s, 'o> {
+    compile_type: CompileType,
     str_pool: &'o StrPool,
     scopes: &'o mut Vec<Scope<'s>>,
     funs: &'o mut Vec<FunPrototype>,
@@ -119,12 +133,14 @@ struct StmtsCompiler<'s, 'o> {
 
 impl<'s, 'o> StmtsCompiler<'s, 'o> {
     fn new(
+        compile_type: CompileType,
         str_pool: &'o StrPool,
         scopes: &'o mut Vec<Scope<'s>>,
         funs: &'o mut Vec<FunPrototype>,
         classes: &'o mut Vec<ClassPrototype>,
     ) -> Self {
         Self {
+            compile_type,
             str_pool,
             scopes,
             funs,
@@ -139,31 +155,31 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                 // early bind
                 if !in_global_scope {
                     self.curr_scope_mut()
-                        .add_var(decl.name.lexeme)
+                        .add_local(decl.name.lexeme)
                         .map_err(|e| GrammarError::at_token(e, decl.name))?
                 }
                 let (codes, upvalue_indexes) = {
                     self.scopes.push(Scope::new());
                     let mut c = StmtsCompiler::new(
+                        CompileType::Fun,
                         self.str_pool,
                         &mut self.scopes,
                         self.funs,
                         self.classes,
                     );
-                    c.new_block();
+                    c.curr_scope_mut().new_block();
+                    // trick: unify stack layout with method
+                    c.curr_scope_mut().add_local("").unwrap();
                     for name in decl.params.iter() {
                         c.curr_scope_mut()
-                            .add_var(name.lexeme)
+                            .add_local(name.lexeme)
                             .map_err(|e| GrammarError::at_token(e, *name))?;
                     }
                     let block = &decl.body;
                     for stmt in block.stmts.iter() {
                         c.compile_decl_or_stmt(&stmt)?;
                     }
-                    c.close_block(block.right_brace_line);
-                    c.chunk
-                        .add_code(OpCode::LoadNil, decl.body.right_brace_line);
-                    c.chunk.add_code(OpCode::Return, decl.body.right_brace_line);
+                    c.compile_implicit_return(decl.body.right_brace_line);
                     (
                         c.chunk.build().into(),
                         c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice(),
@@ -210,7 +226,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                 // early bind
                 if !in_global_scope {
                     self.curr_scope_mut()
-                        .add_var(decl.name.lexeme)
+                        .add_local(decl.name.lexeme)
                         .map_err(|e| GrammarError::at_token(e, decl.name))?
                 }
                 let methods: Box<[Rc<FunPrototype>]> = decl
@@ -218,26 +234,30 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     .iter()
                     .map(|d| -> Result<Rc<FunPrototype>, GrammarError<'s>> {
                         self.scopes.push(Scope::new());
+                        let compile_type = if d.name.lexeme == "init" {
+                            CompileType::Initializer
+                        } else {
+                            CompileType::Method
+                        };
                         let mut c = StmtsCompiler::new(
+                            compile_type,
                             self.str_pool,
                             &mut self.scopes,
                             self.funs,
                             self.classes,
                         );
-                        c.new_block();
+                        c.curr_scope_mut().new_block();
+                        c.curr_scope_mut().add_local("this").unwrap();
                         for name in d.params.iter() {
                             c.curr_scope_mut()
-                                .add_var(name.lexeme)
+                                .add_local(name.lexeme)
                                 .map_err(|e| GrammarError::at_token(e, *name))?;
                         }
-                        c.curr_scope_mut().add_var("this").unwrap();
                         let block = &d.body;
                         for stmt in block.stmts.iter() {
                             c.compile_decl_or_stmt(&stmt)?;
                         }
-                        c.close_block(block.right_brace_line);
-                        c.chunk.add_code(OpCode::LoadNil, d.body.right_brace_line);
-                        c.chunk.add_code(OpCode::Return, d.body.right_brace_line);
+                        c.compile_implicit_return(d.body.right_brace_line);
                         let upvalue_indexes =
                             c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice();
                         let codes = c.chunk.build().into();
@@ -285,7 +305,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
             Ok(())
         } else {
             scope
-                .add_var(name.lexeme)
+                .add_local(name.lexeme)
                 .map_err(|e| GrammarError::at_token(e, name))
         }
     }
@@ -398,15 +418,29 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     ));
                 }
                 if let Some(value) = &r.value {
+                    if let CompileType::Initializer = self.compile_type {
+                        return Err(GrammarError::at_token(
+                            "Can't return a value from an initializer.",
+                            r.return_,
+                        ));
+                    }
                     self.compile_expression(value)?;
                     self.chunk.add_code(OpCode::Return, r.return_.line);
                 } else {
-                    self.chunk.add_code(OpCode::LoadNil, r.return_.line);
-                    self.chunk.add_code(OpCode::Return, r.return_.line);
+                    self.compile_implicit_return(r.return_.line);
                 }
             }
         };
         Ok(())
+    }
+
+    fn compile_implicit_return(&mut self, src_line: u32) {
+        if let CompileType::Initializer = self.compile_type {
+            self.chunk.add_code(OpCode::LoadLocalVar(0), src_line);
+        } else {
+            self.chunk.add_code(OpCode::LoadNil, src_line);
+        };
+        self.chunk.add_code(OpCode::Return, src_line);
     }
 
     fn compile_block(&mut self, block: &BlockStmt<'s>) -> Result<(), GrammarError<'s>> {
@@ -618,22 +652,6 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
     fn curr_scope_mut(&mut self) -> &mut Scope<'s> {
         self.scopes.last_mut().unwrap()
     }
-
-    fn new_block(&mut self) {
-        self.curr_scope_mut().new_block()
-    }
-    fn close_block(&mut self, src_line: u32) {
-        for &captured in self.curr_scope_mut().close_block().iter().rev() {
-            self.chunk.add_code(
-                if captured {
-                    OpCode::PopMaybeUpvalue
-                } else {
-                    OpCode::Pop
-                },
-                src_line,
-            );
-        }
-    }
 }
 
 fn resolve_upvalue<'s>(
@@ -718,7 +736,7 @@ mod test {
     fn test_resolve_upvalue() {
         let mut s1 = Scope::new();
         s1.new_block();
-        s1.add_var("a").unwrap();
+        s1.add_local("a").unwrap();
         let mut vec = vec![s1, Scope::new(), Scope::new()];
         let upvalue_no = resolve_upvalue(&mut vec, 2, "a").unwrap();
         assert_eq!(upvalue_no, Some(0));
