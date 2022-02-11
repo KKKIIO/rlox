@@ -1,6 +1,6 @@
 use core::fmt::Debug;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::{collections::hash_map::Entry, panic};
 
 use std::ops::{AddAssign, Deref, SubAssign};
 use std::{fmt::Display, rc::Rc};
@@ -50,6 +50,9 @@ pub enum OpCode {
     Call(u8),
     MakeClosure(u32),
     MakeClass(u32),
+    DefMethod(u32),
+    Inherit,
+    GetSuperMethod(u32),
     Return,
 }
 
@@ -68,7 +71,7 @@ enum Value {
     NativeFun(#[unsafe_ignore_trace] NativeFun<Self>),
     Closure(Gc<Closure>),
     BoundedMethod(Gc<BoundedMethod>),
-    Class(Gc<Class>),
+    Class(Gc<GcCell<Class>>),
     Object(Gc<GcCell<Object>>),
 }
 
@@ -107,6 +110,28 @@ impl PartialEq for Value {
     }
 }
 
+impl Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Nil => write!(f, "nil"),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Number(n) => write!(f, "{}", GPoint(*n)),
+            Value::String(s) => write!(f, "{}", s),
+            Value::NativeFun(_) => write!(f, "<native fn>"),
+            Value::Closure(c) => write!(f, "<fn {}>", c.proto.name),
+            Value::BoundedMethod(m) => write!(f, "<fn {}>", m.closure.proto.name),
+            Value::Class(c) => write!(f, "{}", c.borrow().proto.name),
+            Value::Object(o) => {
+                write!(
+                    f,
+                    "{} instance",
+                    o.deref().borrow().class.borrow().proto.name
+                )
+            }
+        }
+    }
+}
+
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -117,9 +142,13 @@ impl Display for Value {
             Value::NativeFun(_) => write!(f, "<native fn>"),
             Value::Closure(c) => write!(f, "<fn {}>", c.proto.name),
             Value::BoundedMethod(m) => write!(f, "<fn {}>", m.closure.proto.name),
-            Value::Class(c) => write!(f, "{}", c.proto.name),
+            Value::Class(c) => write!(f, "{}", c.borrow().proto.name),
             Value::Object(o) => {
-                write!(f, "{} instance", o.deref().borrow().class.proto.name)
+                write!(
+                    f,
+                    "{} instance",
+                    o.deref().borrow().class.borrow().proto.name
+                )
             }
         }
     }
@@ -159,22 +188,18 @@ struct Closure {
 #[derive(Debug, PartialEq)]
 pub struct ClassPrototype {
     pub name: Rc<str>,
-    pub has_super: bool,
-    pub methods: Box<[Rc<FunPrototype>]>,
 }
 
 #[derive(Trace, Finalize)]
 struct Class {
-    super_class: Option<Gc<Class>>,
     #[unsafe_ignore_trace]
     proto: Rc<ClassPrototype>,
-    method_tmpls: Box<[Gc<Closure>]>,
+    methods: HashMap<u32, Gc<Closure>>,
 }
 
 #[derive(Trace, Finalize)]
 struct Object {
-    class: Gc<Class>,
-    methods: HashMap<u32, Vec<Gc<BoundedMethod>>>,
+    class: Gc<GcCell<Class>>,
     fields: HashMap<Rc<str>, Value>,
 }
 
@@ -182,7 +207,6 @@ struct Object {
 struct BoundedMethod {
     closure: Gc<Closure>,
     receiver: Value,
-    cls_level: u8,
 }
 
 fn native_fun_clock(_args: Vec<Value>) -> Result<Value, InterpreteError> {
@@ -195,7 +219,7 @@ fn native_fun_clock(_args: Vec<Value>) -> Result<Value, InterpreteError> {
 }
 
 pub struct Module {
-    pub main: Codes,
+    pub script: Codes,
     pub funs: Box<[Rc<FunPrototype>]>,
     pub classes: Box<[Rc<ClassPrototype>]>,
 }
@@ -203,21 +227,13 @@ pub struct Module {
 impl Display for Module {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "main:")?;
-        writeln!(f, "{}", self.main)?;
+        writeln!(f, "{}", self.script)?;
         for (i, fun) in self.funs.iter().enumerate() {
             writeln!(f, "fun(name={}, id={}, arity={})", fun.name, i, fun.arity)?;
             writeln!(f, "{}", fun.codes)?;
         }
         for (i, cls) in self.classes.iter().enumerate() {
-            writeln!(
-                f,
-                "class(name={}, id={}, has_super={})",
-                cls.name, i, cls.has_super
-            )?;
-            for method in cls.methods.iter() {
-                writeln!(f, "method(name={})", method.name)?;
-                writeln!(f, "{}", method.codes)?;
-            }
+            writeln!(f, "class(name={}, id={})", cls.name, i,)?;
         }
         Ok(())
     }
@@ -318,7 +334,7 @@ impl<'p> VM<'p> {
         let mut open_upvalues: Vec<Gc<GcCell<Upvalue>>> = vec![];
         let mut call_frames: Vec<CallFrame> = vec![];
         let mut execute_state = ExecuteState {
-            codes: module.main.into(),
+            codes: module.script.into(),
             ip: 0,
         };
         loop {
@@ -476,55 +492,54 @@ impl<'p> VM<'p> {
                     }
                 }
                 &OpCode::MakeClosure(fun_idx) => {
-                    let fun = &module.funs[fun_idx as usize];
-                    let stack_base = call_frames.last().map_or(0, |f| f.stack_base);
-                    let upvalues = make_upvalues(
+                    stack.push(Value::Closure(Gc::new(make_closure(
+                        &module.funs[fun_idx as usize],
                         &call_frames,
                         &mut open_upvalues,
-                        stack_base,
-                        fun.upvalue_indexes.iter(),
-                    );
-                    stack.push(Value::Closure(Gc::new(Closure {
-                        proto: fun.clone(),
-                        upvalues,
-                    })));
+                    ))));
                 }
                 &OpCode::MakeClass(id) => {
-                    let cls_proto = &module.classes[id as usize];
-                    let super_class = if cls_proto.has_super {
-                        match &stack.pop().unwrap() {
-                            Value::Class(c) => Some(c.clone()),
-                            _ => {
-                                return Err(
-                                    execute_state.err("Superclass must be a class.".to_string())
-                                );
-                            }
+                    stack.push(Value::Class(Gc::new(GcCell::new(Class {
+                        proto: module.classes[id as usize].clone(),
+                        methods: HashMap::new(),
+                    }))));
+                }
+                &OpCode::DefMethod(str_id) => {
+                    let cls = stack.pop().unwrap();
+                    let cls = match &cls {
+                        Value::Class(cls) => cls,
+                        _ => {
+                            panic!("DefineMethod must be called on a class.");
                         }
-                    } else {
-                        None
                     };
-                    let stack_base = call_frames.last().map_or(0, |f| f.stack_base);
-                    let method_tmpls = cls_proto
-                        .methods
-                        .iter()
-                        .map(|proto| {
-                            let upvalues = make_upvalues(
-                                &call_frames,
-                                &mut open_upvalues,
-                                stack_base,
-                                proto.upvalue_indexes.iter(),
+                    let closure = stack.pop().unwrap();
+                    let closure: Gc<Closure> = match &closure {
+                        Value::Closure(c) => c.clone(),
+                        _ => {
+                            panic!("DefineMethod: closure expected");
+                        }
+                    };
+                    cls.borrow_mut().methods.insert(str_id, closure);
+                }
+                &OpCode::Inherit => {
+                    let cls = stack.pop().unwrap();
+                    let cls: Gc<GcCell<Class>> = match &cls {
+                        Value::Class(c) => c.clone(),
+                        _ => {
+                            panic!("Inherit: class expected");
+                        }
+                    };
+                    // keep super_cls in stack for 'super' access
+                    let super_cls = stack.last().unwrap();
+                    let super_cls: Gc<GcCell<Class>> = match &super_cls {
+                        Value::Class(c) => c.clone(),
+                        _ => {
+                            return Err(
+                                execute_state.err("Superclass must be a class.".to_string())
                             );
-                            Gc::new(Closure {
-                                proto: proto.clone(),
-                                upvalues,
-                            })
-                        })
-                        .collect();
-                    stack.push(Value::Class(Gc::new(Class {
-                        super_class,
-                        proto: cls_proto.clone(),
-                        method_tmpls,
-                    })));
+                        }
+                    };
+                    cls.borrow_mut().methods = super_cls.borrow_mut().methods.clone();
                 }
                 &OpCode::Call(args_count) => {
                     debug_assert!(stack.len() >= args_count as usize + 1);
@@ -557,20 +572,22 @@ impl<'p> VM<'p> {
                             let obj = Gc::new(GcCell::new(Object {
                                 class: cls.clone(),
                                 fields: HashMap::new(),
-                                methods: HashMap::new(),
                             }));
-                            self.fill_methods(&obj, cls.clone(), 0);
 
-                            let init_method: Option<Gc<BoundedMethod>> = obj
+                            let init_method: Option<Gc<BoundedMethod>> = cls
                                 .deref()
                                 .borrow()
                                 .methods
                                 .get(&self.str_pool.register("init"))
-                                .and_then(
-                                    |ms: &Vec<Gc<BoundedMethod>>| -> Option<Gc<BoundedMethod>> {
-                                        ms.get(0).map(|m| m.clone())
-                                    },
-                                );
+                                .map(|m| {
+                                    Gc::new({
+                                        let obj: &Gc<GcCell<Object>> = &obj;
+                                        BoundedMethod {
+                                            closure: m.clone(),
+                                            receiver: Value::Object(obj.clone()),
+                                        }
+                                    })
+                                });
                             check_arity(
                                 args_count,
                                 init_method.as_deref().map_or(0, |m| m.closure.proto.arity),
@@ -648,14 +665,13 @@ impl<'p> VM<'p> {
                     .and_then(|obj: Gc<GcCell<Object>>| {
                         if let Some(v) = obj.deref().borrow().fields.get(&prop) {
                             Ok(v.clone())
-                        } else if let Some(method) = obj
-                            .deref()
-                            .borrow()
-                            .methods
-                            .get(&str_id)
-                            .and_then(|ms| ms.get(0))
+                        } else if let Some(method) =
+                            obj.deref().borrow().class.borrow().methods.get(&str_id)
                         {
-                            Ok(Value::BoundedMethod(method.clone()))
+                            Ok(Value::BoundedMethod(Gc::new(BoundedMethod {
+                                closure: method.clone(),
+                                receiver: Value::Object(obj.clone()),
+                            })))
                         } else {
                             Err(execute_state.err(format!("Undefined property '{}'.", prop)))
                         }
@@ -681,6 +697,37 @@ impl<'p> VM<'p> {
                         }
                     };
                     stack.push(value);
+                }
+                &OpCode::GetSuperMethod(str_id) => {
+                    let v2 = stack.pop().unwrap();
+                    let super_cls = match &v2 {
+                        Value::Class(cls) => cls,
+                        _ => {
+                            panic!("expect super class but got {}", v2);
+                        }
+                    };
+                    let v1 = stack.pop().unwrap();
+                    let obj = match &v1 {
+                        Value::Object(obj) => obj,
+                        _ => {
+                            panic!("expect object but got {}", v1);
+                        }
+                    };
+                    let method: Gc<Closure> = super_cls
+                        .borrow()
+                        .methods
+                        .get(&str_id)
+                        .map(|m| m.clone())
+                        .ok_or_else(|| {
+                            execute_state.err(format!(
+                                "Undefined property '{}'.",
+                                self.str_pool.get(str_id)
+                            ))
+                        })?;
+                    stack.push(Value::BoundedMethod(Gc::new(BoundedMethod {
+                        closure: method,
+                        receiver: Value::Object(obj.clone()),
+                    })));
                 }
             };
         }
@@ -708,30 +755,42 @@ impl<'p> VM<'p> {
             _ => false,
         }
     }
+}
 
-    fn fill_methods(&self, o: &'_ Gc<GcCell<Object>>, cls: Gc<Class>, cls_level: u8) {
-        for t in cls.method_tmpls.iter() {
-            let m = BoundedMethod {
-                closure: t.clone(),
-                cls_level: 0,
-                receiver: Value::Object(o.clone()),
-            };
-            match o
-                .borrow_mut()
-                .methods
-                .entry(self.str_pool.register(&t.proto.name))
-            {
-                Entry::Occupied(mut o) => {
-                    o.get_mut().push(m.into());
-                }
-                Entry::Vacant(v) => {
-                    v.insert(vec![m.into()]);
+fn make_closure(
+    fun: &Rc<FunPrototype>,
+    call_frames: &Vec<CallFrame>,
+    open_upvalues: &mut Vec<Gc<GcCell<Upvalue>>>,
+) -> Closure {
+    let stack_base = call_frames.last().map_or(0, |f| f.stack_base);
+    let upvalues = fun
+        .upvalue_indexes
+        .iter()
+        .map(|&uv_idx| match uv_idx {
+            UpvalueIndex::Local(local_idx) => {
+                let stack_i = stack_base + (local_idx as usize);
+                let p = open_upvalues
+                    .iter()
+                    .position(|uv| uv.deref().borrow().get_open_index() >= stack_i)
+                    .unwrap_or(open_upvalues.len());
+                if p < open_upvalues.len()
+                    && open_upvalues[p].deref().borrow().get_open_index() == stack_i
+                {
+                    open_upvalues[p].clone()
+                } else {
+                    let capture = Gc::new(GcCell::new(Upvalue::Open(stack_i)));
+                    open_upvalues.insert(p, capture.clone());
+                    capture
                 }
             }
-        }
-        if let Some(super_cls) = &cls.super_class {
-            self.fill_methods(&o, super_cls.clone(), cls_level + 1);
-        }
+            UpvalueIndex::Upvalue(upvalue_idx) => {
+                call_frames.last().unwrap().closure.upvalues[upvalue_idx as usize].clone()
+            }
+        })
+        .collect();
+    Closure {
+        proto: fun.clone(),
+        upvalues,
     }
 }
 
@@ -753,46 +812,6 @@ fn call_on_value(
     Ok(())
 }
 
-fn make_upvalues<'a, I>(
-    call_frames: &Vec<CallFrame>,
-    open_upvalues: &mut Vec<Gc<GcCell<Upvalue>>>,
-    stack_base: usize,
-    upvalue_indexes: I,
-) -> Box<[Gc<GcCell<Upvalue>>]>
-where
-    I: Iterator<Item = &'a UpvalueIndex>,
-{
-    upvalue_indexes
-        .map(|&uv_idx| match uv_idx {
-            UpvalueIndex::Local(local_idx) => {
-                capture_caller_local(stack_base, local_idx, open_upvalues)
-            }
-            UpvalueIndex::Upvalue(upvalue_idx) => {
-                call_frames.last().unwrap().closure.upvalues[upvalue_idx as usize].clone()
-            }
-        })
-        .collect()
-}
-
-fn capture_caller_local(
-    stack_base: usize,
-    local_idx: u8,
-    open_upvalues: &mut Vec<Gc<GcCell<Upvalue>>>,
-) -> Gc<GcCell<Upvalue>> {
-    let stack_i = stack_base + (local_idx as usize);
-    let p = open_upvalues
-        .iter()
-        .position(|uv| uv.deref().borrow().get_open_index() >= stack_i)
-        .unwrap_or(open_upvalues.len());
-    if p < open_upvalues.len() && open_upvalues[p].deref().borrow().get_open_index() == stack_i {
-        open_upvalues[p].clone()
-    } else {
-        let capture = Gc::new(GcCell::new(Upvalue::Open(stack_i)));
-        open_upvalues.insert(p, capture.clone());
-        capture
-    }
-}
-
 fn check_arity(args_count: u8, arity: u8) -> Result<(), String> {
     if args_count != arity {
         Err(format!(
@@ -801,12 +820,5 @@ fn check_arity(args_count: u8, arity: u8) -> Result<(), String> {
         ))
     } else {
         Ok(())
-    }
-}
-
-fn dump_stack(stack: &Vec<Value>) {
-    println!("Stack:");
-    for (i, v) in stack.iter().enumerate() {
-        println!("{}: {}", i, v);
     }
 }

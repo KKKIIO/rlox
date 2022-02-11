@@ -61,8 +61,8 @@ pub struct Unary<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct Super<'a> {
-    pub super_line: u32,
-    pub method: &'a str,
+    pub super_: Token<'a>,
+    pub method: Token<'a>,
 }
 
 #[derive(Debug, PartialEq)]

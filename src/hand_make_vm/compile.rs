@@ -2,13 +2,12 @@ use std::{
     convert::TryInto,
     num::TryFromIntError,
     ops::{Deref, Neg},
-    rc::Rc,
 };
 
 use crate::ast::{
     error::GrammarError,
     expression::{Expression, LiteralValue},
-    statement::{BlockStmt, DeclOrStmt, File, Statement, VarDecl},
+    statement::{BlockStmt, ClassDecl, DeclOrStmt, File, FunDecl, Statement, VarDecl},
     token::{Token, TokenType},
 };
 
@@ -37,7 +36,7 @@ pub fn compile<'s>(
     }
     c.chunk.add_code(OpCode::Return, program.eof_line);
     Ok(Module {
-        main: c.chunk.build(),
+        script: c.chunk.build(),
         funs: funs.into_iter().map(|f| f.into()).collect(),
         classes: classes.into_iter().map(|c| c.into()).collect(),
     })
@@ -115,6 +114,16 @@ impl<'s> Scope<'s> {
     }
 }
 
+trait IntoGrammarResult<'s, T> {
+    fn at_token(self, token: Token<'s>) -> Result<T, GrammarError<'s>>;
+}
+
+impl<'s, T> IntoGrammarResult<'s, T> for Result<T, &'static str> {
+    fn at_token(self, token: Token<'s>) -> Result<T, GrammarError<'s>> {
+        self.map_err(|e| GrammarError::at_token(e, token))
+    }
+}
+
 enum CompileType {
     Script,
     Fun,
@@ -150,142 +159,150 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
     }
     fn compile_decl_or_stmt(&'_ mut self, ds: &'_ DeclOrStmt<'s>) -> Result<(), GrammarError<'s>> {
         match ds {
-            DeclOrStmt::FunDecl(decl) => {
-                let in_global_scope = self.curr_scope().is_in_global();
-                // early bind
-                if !in_global_scope {
-                    self.curr_scope_mut()
-                        .add_local(decl.name.lexeme)
-                        .map_err(|e| GrammarError::at_token(e, decl.name))?
-                }
-                let (codes, upvalue_indexes) = {
-                    self.scopes.push(Scope::new());
-                    let mut c = StmtsCompiler::new(
-                        CompileType::Fun,
-                        self.str_pool,
-                        &mut self.scopes,
-                        self.funs,
-                        self.classes,
-                    );
-                    c.curr_scope_mut().new_block();
-                    // trick: unify stack layout with method
-                    c.curr_scope_mut().add_local("").unwrap();
-                    for name in decl.params.iter() {
-                        c.curr_scope_mut()
-                            .add_local(name.lexeme)
-                            .map_err(|e| GrammarError::at_token(e, *name))?;
-                    }
-                    let block = &decl.body;
-                    for stmt in block.stmts.iter() {
-                        c.compile_decl_or_stmt(&stmt)?;
-                    }
-                    c.compile_implicit_return(decl.body.right_brace_line);
-                    (
-                        c.chunk.build().into(),
-                        c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice(),
-                    )
-                };
+            DeclOrStmt::ClassDecl(decl) => self.compile_cls_decl(decl),
+            DeclOrStmt::FunDecl(decl) => self.compile_fun_decl(decl),
+            DeclOrStmt::VarDecl(d) => self.compile_var_decl(d),
+            DeclOrStmt::Stmt(ref stmt) => self.compile_stmt(stmt),
+        }
+    }
 
-                let fun = FunPrototype {
-                    name: self.str_pool.register_rc(decl.name.lexeme),
-                    arity: decl.params.len().try_into().unwrap(),
-                    codes,
-                    upvalue_indexes,
-                };
+    fn compile_cls_decl(&'_ mut self, cls_decl: &ClassDecl<'s>) -> Result<(), GrammarError<'s>> {
+        let cls_name = self.str_pool.register_rc(cls_decl.name.lexeme);
+        let in_global_scope = self.curr_scope().is_in_global();
+        if !in_global_scope {
+            self.curr_scope_mut()
+                .add_local(cls_decl.name.lexeme)
+                .at_token(cls_decl.name)?;
+        }
+        let id = self.classes.len().try_into().unwrap();
+        self.classes.push(ClassPrototype { name: cls_name });
+        self.chunk
+            .add_code(OpCode::MakeClass(id), cls_decl.class_line);
+        if in_global_scope {
+            self.chunk.add_code(
+                OpCode::DefGlobalVar(self.str_pool.register(cls_decl.name.lexeme)),
+                cls_decl.name.line,
+            );
+        }
 
-                let fun_id = self.funs.len().try_into().unwrap();
-                self.funs.push(fun);
-                self.chunk
-                    .add_code(OpCode::MakeClosure(fun_id), decl.fun_line);
-                if in_global_scope {
-                    self.chunk.add_code(
-                        OpCode::DefGlobalVar(self.str_pool.register(decl.name.lexeme)),
-                        decl.name.line,
-                    );
-                }
+        if let Some(super_cls) = cls_decl.super_cls {
+            if cls_decl.name.lexeme == super_cls.lexeme {
+                return Err(GrammarError::at_token(
+                    "A class can't inherit from itself.",
+                    super_cls,
+                ));
             }
-            DeclOrStmt::VarDecl(d) => self.compile_var_decl(d)?,
-            DeclOrStmt::Stmt(ref stmt) => self.compile_stmt(stmt)?,
-            DeclOrStmt::ClassDecl(decl) => {
-                if let Some(super_cls) = decl.super_class {
-                    if decl.name.lexeme == super_cls.lexeme {
-                        return Err(GrammarError::at_token(
-                            "A class can't inherit from itself.",
-                            super_cls,
-                        ));
-                    }
-                    let name = super_cls;
-                    if !self.resolve_var(name)? {
-                        self.chunk.add_code(
-                            OpCode::LoadGlobalVar(self.str_pool.register(name.lexeme)),
-                            name.line,
-                        );
-                    }
-                }
-                let in_global_scope = self.curr_scope().is_in_global();
-                // early bind
-                if !in_global_scope {
-                    self.curr_scope_mut()
-                        .add_local(decl.name.lexeme)
-                        .map_err(|e| GrammarError::at_token(e, decl.name))?
-                }
-                let methods: Box<[Rc<FunPrototype>]> = decl
-                    .methods
-                    .iter()
-                    .map(|d| -> Result<Rc<FunPrototype>, GrammarError<'s>> {
-                        self.scopes.push(Scope::new());
-                        let compile_type = if d.name.lexeme == "init" {
-                            CompileType::Initializer
-                        } else {
-                            CompileType::Method
-                        };
-                        let mut c = StmtsCompiler::new(
-                            compile_type,
-                            self.str_pool,
-                            &mut self.scopes,
-                            self.funs,
-                            self.classes,
-                        );
-                        c.curr_scope_mut().new_block();
-                        c.curr_scope_mut().add_local("this").unwrap();
-                        for name in d.params.iter() {
-                            c.curr_scope_mut()
-                                .add_local(name.lexeme)
-                                .map_err(|e| GrammarError::at_token(e, *name))?;
-                        }
-                        let block = &d.body;
-                        for stmt in block.stmts.iter() {
-                            c.compile_decl_or_stmt(&stmt)?;
-                        }
-                        c.compile_implicit_return(d.body.right_brace_line);
-                        let upvalue_indexes =
-                            c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice();
-                        let codes = c.chunk.build().into();
-                        Ok(FunPrototype {
-                            name: self.str_pool.register_rc(d.name.lexeme),
-                            arity: d.params.len().try_into().unwrap(),
-                            codes,
-                            upvalue_indexes,
-                        }
-                        .into())
-                    })
-                    .collect::<Result<Box<[Rc<FunPrototype>]>, GrammarError<'s>>>()?;
-
-                let id = self.classes.len().try_into().unwrap();
-                self.classes.push(ClassPrototype {
-                    name: self.str_pool.register_rc(decl.name.lexeme),
-                    has_super: decl.super_class.is_some(),
-                    methods,
-                });
-                self.chunk.add_code(OpCode::MakeClass(id), decl.class_line);
-                if in_global_scope {
-                    self.chunk.add_code(
-                        OpCode::DefGlobalVar(self.str_pool.register(decl.name.lexeme)),
-                        decl.name.line,
-                    );
-                }
+            self.load_var_by_token(super_cls)?;
+            self.load_var_by_token(cls_decl.name)?;
+            self.chunk.add_code(OpCode::Inherit, super_cls.line);
+            let scope = self.curr_scope_mut();
+            scope.new_block();
+            scope.add_local("super").at_token(super_cls)?;
+        }
+        for method_decl in cls_decl.methods.iter() {
+            let method_name = self.str_pool.register_rc(method_decl.name.lexeme);
+            self.scopes.push(Scope::new());
+            let compile_type = if method_decl.name.lexeme == "init" {
+                CompileType::Initializer
+            } else {
+                CompileType::Method
+            };
+            let mut c = StmtsCompiler::new(
+                compile_type,
+                self.str_pool,
+                &mut self.scopes,
+                self.funs,
+                self.classes,
+            );
+            c.curr_scope_mut().new_block();
+            // trick: add 'this' by compiler and load it automatically by vm
+            c.curr_scope_mut().add_local("this").unwrap();
+            for name in method_decl.params.iter() {
+                c.curr_scope_mut()
+                    .add_local(name.lexeme)
+                    .map_err(|e| GrammarError::at_token(e, *name))?;
             }
+            let block = &method_decl.body;
+            for stmt in block.stmts.iter() {
+                c.compile_decl_or_stmt(&stmt)?;
+            }
+            c.compile_implicit_return(method_decl.body.right_brace_line);
+            let upvalue_indexes = c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice();
+            let codes = c.chunk.build().into();
+
+            let fun = FunPrototype {
+                name: method_name,
+                arity: method_decl.params.len().try_into().unwrap(),
+                codes,
+                upvalue_indexes,
+            };
+            let fun_id = self.funs.len().try_into().unwrap();
+            self.funs.push(fun);
+            self.chunk
+                .add_code(OpCode::MakeClosure(fun_id), method_decl.fun.line);
+            self.load_var_by_token(cls_decl.name)?;
+            self.chunk.add_code(
+                OpCode::DefMethod(self.str_pool.register(method_decl.name.lexeme)),
+                method_decl.name.line,
+            );
+        }
+        if let Some(super_cls) = cls_decl.super_cls {
+            self.close_block(super_cls.line);
+        }
+        Ok(())
+    }
+
+    fn compile_fun_decl(&'_ mut self, decl: &FunDecl<'s>) -> Result<(), GrammarError<'s>> {
+        let fun_name = self.str_pool.register_rc(decl.name.lexeme);
+        let in_global_scope = self.curr_scope().is_in_global();
+        if !in_global_scope {
+            self.curr_scope_mut()
+                .add_local(decl.name.lexeme)
+                .map_err(|e| GrammarError::at_token(e, decl.name))?;
+        }
+        let (codes, upvalue_indexes) = {
+            self.scopes.push(Scope::new());
+            let mut c = StmtsCompiler::new(
+                CompileType::Fun,
+                self.str_pool,
+                &mut self.scopes,
+                self.funs,
+                self.classes,
+            );
+            c.curr_scope_mut().new_block();
+            // trick: unify stack layout with method
+            c.curr_scope_mut().add_local("").unwrap();
+            for name in decl.params.iter() {
+                c.curr_scope_mut()
+                    .add_local(name.lexeme)
+                    .map_err(|e| GrammarError::at_token(e, *name))?;
+            }
+            let block = &decl.body;
+            for stmt in block.stmts.iter() {
+                c.compile_decl_or_stmt(&stmt)?;
+            }
+            c.compile_implicit_return(decl.body.right_brace_line);
+            (
+                c.chunk.build().into(),
+                c.scopes.pop().unwrap().upvalue_indexes.into_boxed_slice(),
+            )
         };
+        let fun = FunPrototype {
+            name: fun_name,
+            arity: decl.params.len().try_into().unwrap(),
+            codes,
+            upvalue_indexes,
+        };
+        let fun_id = self.funs.len().try_into().unwrap();
+        self.funs.push(fun);
+        self.chunk
+            .add_code(OpCode::MakeClosure(fun_id), decl.fun.line);
+        if in_global_scope {
+            self.chunk.add_code(
+                OpCode::DefGlobalVar(self.str_pool.register(decl.name.lexeme)),
+                decl.name.line,
+            );
+        }
         Ok(())
     }
 
@@ -359,7 +376,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                 self.chunk.add_code(OpCode::Pop, stmt.while_.line);
             }
             Statement::For(stmt) => {
-                self.scopes.last_mut().unwrap().new_block();
+                self.new_block();
                 if let Some(init) = &stmt.init {
                     match init.deref() {
                         DeclOrStmt::VarDecl(l) => {
@@ -448,19 +465,11 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
         for stmt in block.stmts.iter() {
             self.compile_decl_or_stmt(&stmt)?;
         }
-        let vars = self.scopes.last_mut().unwrap().close_block();
-        for &captured in vars.iter().rev() {
-            self.chunk.add_code(
-                if captured {
-                    OpCode::PopMaybeUpvalue
-                } else {
-                    OpCode::Pop
-                },
-                block.right_brace_line,
-            );
-        }
+        let line = block.right_brace_line;
+        self.close_block(line);
         Ok(())
     }
+
     fn compile_expression(&'_ mut self, expr: &'_ Expression<'s>) -> Result<(), GrammarError<'s>> {
         match &expr {
             Expression::Literal(l) => {
@@ -565,7 +574,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
             Expression::Grouping(g) => self.compile_expression(&g)?,
             &Expression::Variable(v) => {
                 let name = v.name;
-                if !self.resolve_var(name)? {
+                if !self.load_scope_var_by_token(name)? {
                     self.chunk.add_code(
                         OpCode::LoadGlobalVar(self.str_pool.register(name.lexeme)),
                         name.line,
@@ -573,7 +582,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                 }
             }
             Expression::This(t) => {
-                if !self.resolve_var(t.this)? {
+                if !self.load_scope_var_by_token(t.this)? {
                     return Err(GrammarError::at_token(
                         "Can't use 'this' outside of a class.",
                         t.this,
@@ -617,7 +626,30 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     c.left_paren_line,
                 );
             }
-            Expression::Super(_) => todo!(),
+            Expression::Super(s) => {
+                if !self
+                    .load_scope_var("this", s.super_.line)
+                    .map_err(|e| GrammarError::at_token(e, s.super_))?
+                {
+                    return Err(GrammarError::at_token(
+                        "Can't use 'super' outside of a class.",
+                        s.super_,
+                    ));
+                }
+                if !self
+                    .load_scope_var("super", s.super_.line)
+                    .map_err(|e| GrammarError::at_token(e, s.super_))?
+                {
+                    return Err(GrammarError::at_token(
+                        "Can't use 'super' in a class with no superclass.",
+                        s.super_,
+                    ));
+                }
+                self.chunk.add_code(
+                    OpCode::GetSuperMethod(self.str_pool.register(s.method.lexeme)),
+                    s.method.line,
+                );
+            }
             Expression::Get(g) => {
                 self.compile_expression(&g.expr)?;
                 self.chunk.add_code(
@@ -629,21 +661,50 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
         Ok(())
     }
 
-    fn resolve_var(&mut self, name: Token<'s>) -> Result<bool, GrammarError<'s>> {
-        Ok(
-            if let Some(idx) = self.curr_scope_mut().position(name.lexeme) {
-                self.chunk.add_code(OpCode::LoadLocalVar(idx), name.line);
-                true
-            } else if let Some(idx) =
-                resolve_upvalue(self.scopes, self.scopes.len() - 1, name.lexeme)
-                    .map_err(|e| GrammarError::at_token(e, name))?
-            {
-                self.chunk.add_code(OpCode::LoadUpvalue(idx), name.line);
-                true
-            } else {
-                false
-            },
-        )
+    fn load_scope_var(&mut self, name: &'s str, line: u32) -> Result<bool, &'static str> {
+        Ok(if let Some(idx) = self.curr_scope_mut().position(name) {
+            self.chunk.add_code(OpCode::LoadLocalVar(idx), line);
+            true
+        } else if let Some(idx) = resolve_upvalue(self.scopes, self.scopes.len() - 1, name)? {
+            self.chunk.add_code(OpCode::LoadUpvalue(idx), line);
+            true
+        } else {
+            false
+        })
+    }
+
+    fn load_var(&mut self, name: &'s str, line: u32) -> Result<(), &'static str> {
+        if !self.load_scope_var(name, line)? {
+            self.chunk
+                .add_code(OpCode::LoadGlobalVar(self.str_pool.register(name)), line);
+        }
+        Ok(())
+    }
+
+    fn load_scope_var_by_token(&mut self, name: Token<'s>) -> Result<bool, GrammarError<'s>> {
+        self.load_scope_var(name.lexeme, name.line).at_token(name)
+    }
+
+    fn load_var_by_token(&'_ mut self, name: Token<'s>) -> Result<(), GrammarError<'s>> {
+        self.load_var(name.lexeme, name.line).at_token(name)
+    }
+
+    fn new_block(&mut self) {
+        self.scopes.last_mut().unwrap().new_block()
+    }
+
+    fn close_block(&mut self, line: u32) {
+        let vars = self.scopes.last_mut().unwrap().close_block();
+        for &captured in vars.iter().rev() {
+            self.chunk.add_code(
+                if captured {
+                    OpCode::PopMaybeUpvalue
+                } else {
+                    OpCode::Pop
+                },
+                line,
+            );
+        }
     }
 
     fn curr_scope(&self) -> &Scope<'s> {
@@ -749,7 +810,7 @@ mod test {
     #[test]
     fn test_pop_open_upvalue() {
         let str_pool = StrPool::new();
-        let Module { main, funs, .. } = compile(
+        let Module { script, funs, .. } = compile(
             &parse_source(
                 r#"
 {
@@ -766,7 +827,7 @@ mod test {
         )
         .unwrap();
         assert_eq!(
-            main.codes,
+            script.codes,
             [
                 OpCode::LoadNumber(1.),
                 OpCode::MakeClosure(0),
@@ -793,7 +854,7 @@ mod test {
     #[test]
     fn test_mix_if_and_logic_op() {
         let str_pool = StrPool::new();
-        let Module { main, .. } = compile(
+        let Module { script, .. } = compile(
             &parse_source(
                 r#"
 {
@@ -811,7 +872,7 @@ mod test {
         )
         .unwrap();
         assert_eq!(
-            main.codes,
+            script.codes,
             [
                 OpCode::LoadNumber(1.),
                 OpCode::LoadNumber(2.),
@@ -837,6 +898,72 @@ mod test {
             ]
             .into()
         );
+    }
+    #[test]
+    fn test_inheritance() {
+        let str_pool = StrPool::new();
+        let Module { script, funs, .. } = compile(
+            &parse_source(
+                r#"
+class Base{
+    m1() {
+        print "Base.m1";
+    }
+}
+class Derived1 < Base{
+    m1() {
+        super.m1();
+        print "Derived1.m1";
+    }
+}
+{
+    class Derived2 < Base{
+        m1() {
+            print "Derived2.m1";
+        }
+    }
+}
+                "#
+                .as_bytes(),
+            )
+            .unwrap(),
+            &str_pool,
+        )
+        .unwrap();
+        assert_eq!(
+            script.codes,
+            [
+                OpCode::MakeClass(0),
+                OpCode::DefGlobalVar(0),
+                OpCode::LoadGlobalVar(0),
+                OpCode::MakeClass(1),
+                OpCode::PopMaybeUpvalue,
+                OpCode::DefGlobalVar(3),
+                OpCode::LoadGlobalVar(0),
+                OpCode::MakeClass(2),
+                OpCode::Pop,
+                OpCode::Pop,
+                OpCode::Return,
+            ]
+            .into()
+        );
+        let d1m1 = funs[1].deref();
+        assert_eq!(
+            d1m1.codes.codes,
+            [
+                OpCode::LoadLocalVar(0),
+                OpCode::LoadUpvalue(0),
+                OpCode::GetSuperMethod(1),
+                OpCode::Call(0),
+                OpCode::Pop,
+                OpCode::LoadConstStr(4),
+                OpCode::Print,
+                OpCode::LoadNil,
+                OpCode::Return,
+            ]
+            .into()
+        );
+        assert_eq!(d1m1.upvalue_indexes, [UpvalueIndex::Local(0)].into());
     }
 }
 

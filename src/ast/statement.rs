@@ -12,13 +12,13 @@ pub enum DeclOrStmt<'a> {
 pub struct ClassDecl<'a> {
     pub class_line: u32,
     pub name: Token<'a>,
-    pub super_class: Option<Token<'a>>,
+    pub super_cls: Option<Token<'a>>,
     pub methods: Vec<FunDecl<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct FunDecl<'a> {
-    pub fun_line: u32,
+    pub fun: Token<'a>,
     pub name: Token<'a>,
     pub params: Vec<Token<'a>>,
     pub body: BlockStmt<'a>,

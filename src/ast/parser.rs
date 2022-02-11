@@ -78,7 +78,7 @@ impl<'a> Parser<'a> {
     fn class_declaration(&mut self) -> Result<ClassDecl<'a>, GrammarError<'a>> {
         let class_line = self.previous().line;
         let name = self.consume(TokenType::Identifier, "Expect class name.")?;
-        let super_class = if self.match_t(TokenType::Less) {
+        let super_cls = if self.match_t(TokenType::Less) {
             Some(self.consume(TokenType::Identifier, "Expect superclass name.")?)
         } else {
             None
@@ -92,7 +92,7 @@ impl<'a> Parser<'a> {
         Ok(ClassDecl {
             class_line,
             name,
-            super_class,
+            super_cls,
             methods,
         })
     }
@@ -254,7 +254,7 @@ impl<'a> Parser<'a> {
                 ERROR_METHOD_LEFT_BRACKET,
             ),
         };
-        let fun_line = self.previous().line;
+        let fun = self.previous();
         let name = self.consume(TokenType::Identifier, err_name)?;
         self.consume(TokenType::LeftParen, err_leftparen)?;
         let mut params = vec![];
@@ -281,7 +281,7 @@ impl<'a> Parser<'a> {
         }
         let body = self.block()?;
         Ok(FunDecl {
-            fun_line,
+            fun,
             name,
             params,
             body,
@@ -527,12 +527,10 @@ impl<'a> Parser<'a> {
                 line,
             }))
         } else if self.match_t(TokenType::Super) {
-            let super_line = self.previous().line;
+            let super_ = self.previous();
             self.consume(TokenType::Dot, "Expect '.' after 'super'.")?;
-            let method = self
-                .consume(TokenType::Identifier, "Expect superclass method name.")?
-                .lexeme;
-            Ok(Expression::Super(Super { super_line, method }))
+            let method = self.consume(TokenType::Identifier, "Expect superclass method name.")?;
+            Ok(Expression::Super(Super { super_, method }))
         } else if self.match_t(TokenType::This) {
             Ok(Expression::This(This {
                 this: self.previous(),
