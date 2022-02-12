@@ -78,19 +78,27 @@ enum Value {
 }
 
 impl Value {
-    fn try_into_class(&self) -> Result<Gc<GcCell<Class>>, Self> {
+    fn try_into_class(&self) -> Result<Gc<GcCell<Class>>, &Self> {
         if let Self::Class(v) = self {
             Ok(v.clone())
         } else {
-            Err(self.clone())
+            Err(self)
         }
     }
 
-    fn try_into_object(&self) -> Result<Gc<GcCell<Object>>, Self> {
+    fn try_into_object(&self) -> Result<Gc<GcCell<Object>>, &Self> {
         if let Self::Object(v) = self {
             Ok(v.clone())
         } else {
-            Err(self.clone())
+            Err(self)
+        }
+    }
+
+    fn try_into_closure(&self) -> Result<Gc<Closure>, &Self> {
+        if let Self::Closure(v) = self {
+            Ok(v.clone())
+        } else {
+            Err(self)
         }
     }
 }
@@ -215,6 +223,7 @@ struct Class {
     #[unsafe_ignore_trace]
     proto: Rc<ClassPrototype>,
     methods: HashMap<u32, Gc<Closure>>,
+    init_method: Option<Gc<Closure>>,
 }
 
 #[derive(Trace, Finalize)]
@@ -303,6 +312,8 @@ static ADD_OPERANDS_ERR_MSG: &'static str = "Operands must be two numbers or two
 struct ExecuteState {
     codes: Rc<Codes>,
     ip: usize,
+    call_frames: Vec<CallFrame>,
+    open_upvalues: Vec<Gc<GcCell<Upvalue>>>,
 }
 
 impl ExecuteState {
@@ -333,22 +344,78 @@ impl ExecuteState {
             self.ip.add_assign((offset - 1) as usize);
         }
     }
+    fn stack_base(&self) -> usize {
+        self.call_frames.last().map_or(0, |f| f.stack_base)
+    }
 
     fn call_on_closure(
         &mut self,
         args_count: u8,
         closure: &Gc<Closure>,
-        call_frames: &mut Vec<CallFrame>,
         stack_base: usize,
     ) -> Result<(), InterpreteError> {
-        check_arity(args_count, closure.proto.arity).map_err(|e| self.err(e))?;
+        let arity = closure.proto.arity;
+        if args_count != arity {
+            return Err(self.err(format!(
+                "Expected {} arguments but got {}.",
+                arity, args_count
+            )));
+        };
         let (return_codes, return_ip) = self.set_fun_codes(closure.proto.codes.clone(), 0);
-        call_frames.push(CallFrame {
+        self.call_frames.push(CallFrame {
             stack_base,
             closure: closure.clone(),
             return_ip,
             return_codes,
         });
+        Ok(())
+    }
+
+    fn call_on_value(
+        &mut self,
+        stack: &mut Vec<Value>,
+        args_count: u8,
+    ) -> Result<(), InterpreteError> {
+        debug_assert!(stack.len() >= args_count as usize + 1);
+        if self.call_frames.len() >= 64 {
+            return Err(self.err("Stack overflow.".to_string()));
+        }
+        let args_start = stack.len() - (args_count as usize);
+        match &stack[args_start - 1].clone() {
+            Value::Closure(closure) => {
+                self.call_on_closure(args_count, closure, args_start - 1)?;
+            }
+            Value::BoundedMethod(method) => {
+                stack[args_start - 1] = method.receiver.clone();
+                self.call_on_closure(args_count, &method.closure, args_start - 1)?;
+            }
+            Value::Class(cls) => {
+                let obj = Gc::new(GcCell::new(Object {
+                    class: cls.clone(),
+                    fields: HashMap::new(),
+                }));
+
+                if let Some(m) = &cls.borrow().init_method {
+                    stack[args_start - 1] = Value::Object(obj);
+                    self.call_on_closure(args_count, m, args_start - 1)?;
+                } else {
+                    if args_count != 0 {
+                        return Err(
+                            self.err(format!("Expected {} arguments but got {}.", 0, args_count))
+                        );
+                    }
+                    stack.push(Value::Object(obj));
+                }
+            }
+            Value::NativeFun(callee) => {
+                let args = stack.drain(args_start..).collect();
+                stack.pop().unwrap();
+                stack.push((callee.fun)(args)?);
+            }
+            _ => {
+                return Err(self.err("Can only call functions and classes.".to_string()));
+            }
+        };
         Ok(())
     }
 }
@@ -369,11 +436,11 @@ impl<'p> VM<'p> {
 
     pub fn run(&mut self, module: Module) -> Result<(), InterpreteError> {
         let mut stack = vec![];
-        let mut open_upvalues: Vec<Gc<GcCell<Upvalue>>> = vec![];
-        let mut call_frames: Vec<CallFrame> = vec![];
         let mut execute_state = ExecuteState {
             codes: module.script.into(),
             ip: 0,
+            call_frames: vec![],
+            open_upvalues: vec![],
         };
         loop {
             let op_code = execute_state.next();
@@ -409,18 +476,18 @@ impl<'p> VM<'p> {
                     }
                 },
                 &OpCode::LoadLocalVar(local_idx) => {
-                    let i = call_frames.last().map_or(0, |f| f.stack_base) + (local_idx as usize);
+                    let i = execute_state.stack_base() + (local_idx as usize);
                     debug_assert!(i < stack.len());
                     let v = stack.get(i).unwrap().clone();
                     stack.push(v);
                 }
                 &OpCode::SetLobalVar(local_idx) => {
-                    let i = call_frames.last().map_or(0, |f| f.stack_base) + (local_idx as usize);
+                    let i = execute_state.stack_base() + (local_idx as usize);
                     stack[i as usize] = stack.last().unwrap().clone();
                 }
                 &OpCode::LoadUpvalue(i) => {
                     let upvalue: &Gc<GcCell<Upvalue>> =
-                        &call_frames.last().unwrap().closure.upvalues[i as usize];
+                        &execute_state.call_frames.last().unwrap().closure.upvalues[i as usize];
                     let v = match upvalue.deref().borrow().deref() {
                         &Upvalue::Open(i) => stack[i].clone(),
                         Upvalue::Closed(v) => v.clone(),
@@ -430,7 +497,7 @@ impl<'p> VM<'p> {
                 &OpCode::SetUpvalue(i) => {
                     let value = stack.last().unwrap().clone();
                     let upvalue: &Gc<GcCell<Upvalue>> =
-                        &call_frames.last().unwrap().closure.upvalues[i as usize];
+                        &execute_state.call_frames.last().unwrap().closure.upvalues[i as usize];
                     let open = upvalue.deref().borrow().as_open().copied();
                     match open {
                         Some(i) => {
@@ -530,43 +597,58 @@ impl<'p> VM<'p> {
                     }
                 }
                 &OpCode::MakeClosure(fun_idx) => {
-                    stack.push(Value::Closure(Gc::new(make_closure(
-                        &module.funs[fun_idx as usize],
-                        &call_frames,
-                        &mut open_upvalues,
-                    ))));
+                    let fun: &Rc<FunPrototype> = &module.funs[fun_idx as usize];
+                    let stack_base = execute_state.stack_base();
+                    let upvalues = fun
+                        .upvalue_indexes
+                        .iter()
+                        .map(|&uv_idx| match uv_idx {
+                            UpvalueIndex::Local(local_idx) => {
+                                let stack_i = stack_base + (local_idx as usize);
+                                let open_upvalues = &mut execute_state.open_upvalues;
+                                let p = open_upvalues
+                                    .iter()
+                                    .position(|uv| uv.deref().borrow().get_open_index() >= stack_i)
+                                    .unwrap_or(open_upvalues.len());
+                                if p < open_upvalues.len()
+                                    && open_upvalues[p].deref().borrow().get_open_index() == stack_i
+                                {
+                                    open_upvalues[p].clone()
+                                } else {
+                                    let capture = Gc::new(GcCell::new(Upvalue::Open(stack_i)));
+                                    open_upvalues.insert(p, capture.clone());
+                                    capture
+                                }
+                            }
+                            UpvalueIndex::Upvalue(upvalue_idx) => {
+                                execute_state.call_frames.last().unwrap().closure.upvalues
+                                    [upvalue_idx as usize]
+                                    .clone()
+                            }
+                        })
+                        .collect();
+                    stack.push(Value::Closure(Gc::new(Closure {
+                        proto: fun.clone(),
+                        upvalues,
+                    })));
                 }
                 &OpCode::MakeClass(id) => {
                     stack.push(Value::Class(Gc::new(GcCell::new(Class {
                         proto: module.classes[id as usize].clone(),
                         methods: HashMap::new(),
+                        init_method: None,
                     }))));
                 }
                 &OpCode::DefMethod(str_id) => {
-                    let cls = stack.pop().unwrap();
-                    let cls = match &cls {
-                        Value::Class(cls) => cls,
-                        _ => {
-                            panic!("DefineMethod must be called on a class.");
-                        }
-                    };
-                    let closure = stack.pop().unwrap();
-                    let closure: Gc<Closure> = match &closure {
-                        Value::Closure(c) => c.clone(),
-                        _ => {
-                            panic!("DefineMethod: closure expected");
-                        }
-                    };
+                    let cls = stack.pop().unwrap().try_into_class().unwrap();
+                    let closure = stack.pop().unwrap().try_into_closure().unwrap();
+                    if self.str_pool.get(str_id).deref() == "init" {
+                        cls.borrow_mut().init_method = Some(closure.clone());
+                    }
                     cls.borrow_mut().methods.insert(str_id, closure);
                 }
                 &OpCode::Inherit => {
-                    let cls = stack.pop().unwrap();
-                    let cls: Gc<GcCell<Class>> = match &cls {
-                        Value::Class(c) => c.clone(),
-                        _ => {
-                            panic!("Inherit: class expected");
-                        }
-                    };
+                    let cls = stack.pop().unwrap().try_into_class().unwrap();
                     // keep super_cls in stack for 'super' access
                     let super_cls = stack.last().unwrap();
                     let super_cls: Gc<GcCell<Class>> = match &super_cls {
@@ -577,14 +659,12 @@ impl<'p> VM<'p> {
                             );
                         }
                     };
-                    cls.borrow_mut().methods = super_cls.borrow_mut().methods.clone();
+                    let mut cls = cls.borrow_mut();
+                    let super_cls = super_cls.borrow();
+                    cls.methods = super_cls.methods.clone();
+                    cls.init_method = super_cls.init_method.clone();
                 }
-                &OpCode::Call(args_count) => self.call_on_value(
-                    &mut stack,
-                    args_count,
-                    &mut call_frames,
-                    &mut execute_state,
-                )?,
+                &OpCode::Call(args_count) => execute_state.call_on_value(&mut stack, args_count)?,
                 &OpCode::Invoke(str_id, args_count) => {
                     debug_assert!(stack.len() >= args_count as usize + 1);
                     let prop = self.str_pool.get(str_id);
@@ -599,22 +679,12 @@ impl<'p> VM<'p> {
                     };
                     if let Some(v) = obj.deref().borrow().fields.get(&prop) {
                         stack[args_start - 1] = v.clone();
-                        self.call_on_value(
-                            &mut stack,
-                            args_count,
-                            &mut call_frames,
-                            &mut execute_state,
-                        )?;
+                        execute_state.call_on_value(&mut stack, args_count)?;
                     } else {
                         if let Some(closure) =
                             obj.deref().borrow().class.borrow().methods.get(&str_id)
                         {
-                            execute_state.call_on_closure(
-                                args_count,
-                                &closure,
-                                &mut call_frames,
-                                args_start - 1,
-                            )?;
+                            execute_state.call_on_closure(args_count, &closure, args_start - 1)?;
                         } else {
                             return Err(
                                 execute_state.err(format!("Undefined property '{}'.", prop))
@@ -629,18 +699,13 @@ impl<'p> VM<'p> {
                     let args_start = stack.len() - (args_count as usize);
                     debug_assert!(matches!(stack[args_start - 1], Value::Object(_)));
                     if let Some(closure) = super_cls.borrow().methods.get(&str_id) {
-                        execute_state.call_on_closure(
-                            args_count,
-                            &closure,
-                            &mut call_frames,
-                            args_start - 1,
-                        )?;
+                        execute_state.call_on_closure(args_count, &closure, args_start - 1)?;
                     } else {
                         return Err(execute_state.err(format!("Undefined property '{}'.", prop)));
                     };
                 }
                 OpCode::Return => {
-                    let frame: CallFrame = if let Some(frame) = call_frames.pop() {
+                    let frame: CallFrame = if let Some(frame) = execute_state.call_frames.pop() {
                         frame
                     } else {
                         return Ok(());
@@ -652,10 +717,11 @@ impl<'p> VM<'p> {
                         .rev()
                         .for_each(|(local_idx, v)| {
                             let stack_i = frame.stack_base + local_idx;
-                            if let Some(upvalue_ref) = open_upvalues.last() {
+                            if let Some(upvalue_ref) = execute_state.open_upvalues.last() {
                                 let open_idx = upvalue_ref.deref().borrow().get_open_index();
                                 if open_idx == stack_i {
-                                    *open_upvalues.pop().unwrap().borrow_mut() = Upvalue::Closed(v);
+                                    *execute_state.open_upvalues.pop().unwrap().borrow_mut() =
+                                        Upvalue::Closed(v);
                                 }
                             }
                         });
@@ -665,7 +731,8 @@ impl<'p> VM<'p> {
                 OpCode::PopMaybeUpvalue => {
                     let v = stack.pop().unwrap();
                     let pop_i = stack.len();
-                    let is_open_upvalue = open_upvalues
+                    let is_open_upvalue = execute_state
+                        .open_upvalues
                         .last()
                         .map(|v| {
                             let open_idx = v.deref().borrow().get_open_index();
@@ -674,7 +741,7 @@ impl<'p> VM<'p> {
                         })
                         .unwrap_or(false);
                     if is_open_upvalue {
-                        let upvalue = open_upvalues.pop().unwrap();
+                        let upvalue = execute_state.open_upvalues.pop().unwrap();
                         *upvalue.borrow_mut() = Upvalue::Closed(v);
                     }
                 }
@@ -744,79 +811,6 @@ impl<'p> VM<'p> {
         }
     }
 
-    fn call_on_value(
-        &mut self,
-        stack: &mut Vec<Value>,
-        args_count: u8,
-        call_frames: &mut Vec<CallFrame>,
-        execute_state: &mut ExecuteState,
-    ) -> Result<(), InterpreteError> {
-        debug_assert!(stack.len() >= args_count as usize + 1);
-        if call_frames.len() >= 64 {
-            return Err(execute_state.err("Stack overflow.".to_string()));
-        }
-        let args_start = stack.len() - (args_count as usize);
-        match &stack[args_start - 1].clone() {
-            Value::Closure(closure) => {
-                execute_state.call_on_closure(args_count, closure, call_frames, args_start - 1)?;
-            }
-            Value::BoundedMethod(method) => {
-                stack[args_start - 1] = method.receiver.clone();
-                execute_state.call_on_closure(
-                    args_count,
-                    &method.closure,
-                    call_frames,
-                    args_start - 1,
-                )?;
-            }
-            Value::Class(cls) => {
-                let obj = Gc::new(GcCell::new(Object {
-                    class: cls.clone(),
-                    fields: HashMap::new(),
-                }));
-
-                let init_method: Option<Gc<BoundedMethod>> = cls
-                    .deref()
-                    .borrow()
-                    .methods
-                    .get(&self.str_pool.register("init"))
-                    .map(|m| {
-                        Gc::new({
-                            let obj: &Gc<GcCell<Object>> = &obj;
-                            BoundedMethod {
-                                closure: m.clone(),
-                                receiver: Value::Object(obj.clone()),
-                            }
-                        })
-                    });
-                check_arity(
-                    args_count,
-                    init_method.as_deref().map_or(0, |m| m.closure.proto.arity),
-                )
-                .map_err(|e| execute_state.err(e))?;
-
-                stack[args_start - 1] = Value::Object(obj);
-                if let Some(m) = init_method {
-                    execute_state.call_on_closure(
-                        args_count,
-                        &m.closure,
-                        call_frames,
-                        args_start - 1,
-                    )?;
-                }
-            }
-            Value::NativeFun(callee) => {
-                let args = stack.drain(args_start..).collect();
-                stack.pop().unwrap();
-                stack.push((callee.fun)(args)?);
-            }
-            _ => {
-                return Err(execute_state.err("Can only call functions and classes.".to_string()));
-            }
-        };
-        Ok(())
-    }
-
     fn try_pop2num(stack: &mut Vec<Value>) -> Result<(f64, f64), &'static str> {
         let len = stack.len();
         let bi = len - 1;
@@ -839,53 +833,5 @@ impl<'p> VM<'p> {
             Value::Bool(b) => !b,
             _ => false,
         }
-    }
-}
-
-fn make_closure(
-    fun: &Rc<FunPrototype>,
-    call_frames: &Vec<CallFrame>,
-    open_upvalues: &mut Vec<Gc<GcCell<Upvalue>>>,
-) -> Closure {
-    let stack_base = call_frames.last().map_or(0, |f| f.stack_base);
-    let upvalues = fun
-        .upvalue_indexes
-        .iter()
-        .map(|&uv_idx| match uv_idx {
-            UpvalueIndex::Local(local_idx) => {
-                let stack_i = stack_base + (local_idx as usize);
-                let p = open_upvalues
-                    .iter()
-                    .position(|uv| uv.deref().borrow().get_open_index() >= stack_i)
-                    .unwrap_or(open_upvalues.len());
-                if p < open_upvalues.len()
-                    && open_upvalues[p].deref().borrow().get_open_index() == stack_i
-                {
-                    open_upvalues[p].clone()
-                } else {
-                    let capture = Gc::new(GcCell::new(Upvalue::Open(stack_i)));
-                    open_upvalues.insert(p, capture.clone());
-                    capture
-                }
-            }
-            UpvalueIndex::Upvalue(upvalue_idx) => {
-                call_frames.last().unwrap().closure.upvalues[upvalue_idx as usize].clone()
-            }
-        })
-        .collect();
-    Closure {
-        proto: fun.clone(),
-        upvalues,
-    }
-}
-
-fn check_arity(args_count: u8, arity: u8) -> Result<(), String> {
-    if args_count != arity {
-        Err(format!(
-            "Expected {} arguments but got {}.",
-            arity, args_count
-        ))
-    } else {
-        Ok(())
     }
 }
