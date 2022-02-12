@@ -51,7 +51,9 @@ pub enum OpCode {
     MakeClosure(u32),
     MakeClass(u32),
     DefMethod(u32),
+    Invoke(u32, u8),
     Inherit,
+    InvokeSuper(u32, u8),
     GetSuperMethod(u32),
     Return,
 }
@@ -73,6 +75,24 @@ enum Value {
     BoundedMethod(Gc<BoundedMethod>),
     Class(Gc<GcCell<Class>>),
     Object(Gc<GcCell<Object>>),
+}
+
+impl Value {
+    fn try_into_class(&self) -> Result<Gc<GcCell<Class>>, Self> {
+        if let Self::Class(v) = self {
+            Ok(v.clone())
+        } else {
+            Err(self.clone())
+        }
+    }
+
+    fn try_into_object(&self) -> Result<Gc<GcCell<Object>>, Self> {
+        if let Self::Object(v) = self {
+            Ok(v.clone())
+        } else {
+            Err(self.clone())
+        }
+    }
 }
 
 fn gccell_ref_eq<T>(a: &Gc<GcCell<T>>, b: &Gc<GcCell<T>>) -> bool
@@ -313,6 +333,24 @@ impl ExecuteState {
             self.ip.add_assign((offset - 1) as usize);
         }
     }
+
+    fn call_on_closure(
+        &mut self,
+        args_count: u8,
+        closure: &Gc<Closure>,
+        call_frames: &mut Vec<CallFrame>,
+        stack_base: usize,
+    ) -> Result<(), InterpreteError> {
+        check_arity(args_count, closure.proto.arity).map_err(|e| self.err(e))?;
+        let (return_codes, return_ip) = self.set_fun_codes(closure.proto.codes.clone(), 0);
+        call_frames.push(CallFrame {
+            stack_base,
+            closure: closure.clone(),
+            return_ip,
+            return_codes,
+        });
+        Ok(())
+    }
 }
 
 impl<'p> VM<'p> {
@@ -541,79 +579,64 @@ impl<'p> VM<'p> {
                     };
                     cls.borrow_mut().methods = super_cls.borrow_mut().methods.clone();
                 }
-                &OpCode::Call(args_count) => {
+                &OpCode::Call(args_count) => self.call_on_value(
+                    &mut stack,
+                    args_count,
+                    &mut call_frames,
+                    &mut execute_state,
+                )?,
+                &OpCode::Invoke(str_id, args_count) => {
                     debug_assert!(stack.len() >= args_count as usize + 1);
-                    // todo: throw this error only when pushing a call frame
-                    if call_frames.len() >= 64 {
-                        return Err(execute_state.err("Stack overflow.".to_string()));
-                    }
+                    let prop = self.str_pool.get(str_id);
                     let args_start = stack.len() - (args_count as usize);
-                    match &stack[args_start - 1].clone() {
-                        Value::Closure(closure) => {
-                            call_on_value(
-                                args_count,
-                                closure,
-                                &mut execute_state,
-                                &mut call_frames,
-                                args_start - 1,
-                            )?;
-                        }
-                        Value::BoundedMethod(method) => {
-                            stack[args_start - 1] = method.receiver.clone();
-                            call_on_value(
-                                args_count,
-                                &method.closure,
-                                &mut execute_state,
-                                &mut call_frames,
-                                args_start - 1,
-                            )?;
-                        }
-                        Value::Class(cls) => {
-                            let obj = Gc::new(GcCell::new(Object {
-                                class: cls.clone(),
-                                fields: HashMap::new(),
-                            }));
-
-                            let init_method: Option<Gc<BoundedMethod>> = cls
-                                .deref()
-                                .borrow()
-                                .methods
-                                .get(&self.str_pool.register("init"))
-                                .map(|m| {
-                                    Gc::new({
-                                        let obj: &Gc<GcCell<Object>> = &obj;
-                                        BoundedMethod {
-                                            closure: m.clone(),
-                                            receiver: Value::Object(obj.clone()),
-                                        }
-                                    })
-                                });
-                            check_arity(
-                                args_count,
-                                init_method.as_deref().map_or(0, |m| m.closure.proto.arity),
-                            )
-                            .map_err(|e| execute_state.err(e))?;
-
-                            stack[args_start - 1] = Value::Object(obj);
-                            if let Some(m) = init_method {
-                                call_on_value(
-                                    args_count,
-                                    &m.closure,
-                                    &mut execute_state,
-                                    &mut call_frames,
-                                    args_start - 1,
-                                )?;
-                            }
-                        }
-                        Value::NativeFun(callee) => {
-                            let args = stack.drain(args_start..).collect();
-                            stack.pop().unwrap();
-                            stack.push((callee.fun)(args)?);
-                        }
+                    let obj = match &stack[args_start - 1] {
+                        Value::Object(obj) => obj.clone(),
                         _ => {
-                            return Err(execute_state
-                                .err("Can only call functions and classes.".to_string()));
+                            return Err(
+                                execute_state.err("Only instances have properties.".to_string())
+                            )
                         }
+                    };
+                    if let Some(v) = obj.deref().borrow().fields.get(&prop) {
+                        stack[args_start - 1] = v.clone();
+                        self.call_on_value(
+                            &mut stack,
+                            args_count,
+                            &mut call_frames,
+                            &mut execute_state,
+                        )?;
+                    } else {
+                        if let Some(closure) =
+                            obj.deref().borrow().class.borrow().methods.get(&str_id)
+                        {
+                            execute_state.call_on_closure(
+                                args_count,
+                                &closure,
+                                &mut call_frames,
+                                args_start - 1,
+                            )?;
+                        } else {
+                            return Err(
+                                execute_state.err(format!("Undefined property '{}'.", prop))
+                            );
+                        }
+                    };
+                }
+                &OpCode::InvokeSuper(str_id, args_count) => {
+                    let super_cls = stack.pop().unwrap().try_into_class().unwrap();
+                    debug_assert!(stack.len() >= args_count as usize + 1);
+                    let prop = self.str_pool.get(str_id);
+                    let args_start = stack.len() - (args_count as usize);
+                    debug_assert!(matches!(stack[args_start - 1], Value::Object(_)));
+                    if let Some(closure) = super_cls.borrow().methods.get(&str_id) {
+                        execute_state.call_on_closure(
+                            args_count,
+                            &closure,
+                            &mut call_frames,
+                            args_start - 1,
+                        )?;
+                    } else {
+                        return Err(execute_state.err(format!("Undefined property '{}'.", prop)));
                     };
                 }
                 OpCode::Return => {
@@ -699,20 +722,8 @@ impl<'p> VM<'p> {
                     stack.push(value);
                 }
                 &OpCode::GetSuperMethod(str_id) => {
-                    let v2 = stack.pop().unwrap();
-                    let super_cls = match &v2 {
-                        Value::Class(cls) => cls,
-                        _ => {
-                            panic!("expect super class but got {}", v2);
-                        }
-                    };
-                    let v1 = stack.pop().unwrap();
-                    let obj = match &v1 {
-                        Value::Object(obj) => obj,
-                        _ => {
-                            panic!("expect object but got {}", v1);
-                        }
-                    };
+                    let super_cls = stack.pop().unwrap().try_into_class().unwrap();
+                    let obj = stack.pop().unwrap().try_into_object().unwrap();
                     let method: Gc<Closure> = super_cls
                         .borrow()
                         .methods
@@ -732,6 +743,80 @@ impl<'p> VM<'p> {
             };
         }
     }
+
+    fn call_on_value(
+        &mut self,
+        stack: &mut Vec<Value>,
+        args_count: u8,
+        call_frames: &mut Vec<CallFrame>,
+        execute_state: &mut ExecuteState,
+    ) -> Result<(), InterpreteError> {
+        debug_assert!(stack.len() >= args_count as usize + 1);
+        if call_frames.len() >= 64 {
+            return Err(execute_state.err("Stack overflow.".to_string()));
+        }
+        let args_start = stack.len() - (args_count as usize);
+        match &stack[args_start - 1].clone() {
+            Value::Closure(closure) => {
+                execute_state.call_on_closure(args_count, closure, call_frames, args_start - 1)?;
+            }
+            Value::BoundedMethod(method) => {
+                stack[args_start - 1] = method.receiver.clone();
+                execute_state.call_on_closure(
+                    args_count,
+                    &method.closure,
+                    call_frames,
+                    args_start - 1,
+                )?;
+            }
+            Value::Class(cls) => {
+                let obj = Gc::new(GcCell::new(Object {
+                    class: cls.clone(),
+                    fields: HashMap::new(),
+                }));
+
+                let init_method: Option<Gc<BoundedMethod>> = cls
+                    .deref()
+                    .borrow()
+                    .methods
+                    .get(&self.str_pool.register("init"))
+                    .map(|m| {
+                        Gc::new({
+                            let obj: &Gc<GcCell<Object>> = &obj;
+                            BoundedMethod {
+                                closure: m.clone(),
+                                receiver: Value::Object(obj.clone()),
+                            }
+                        })
+                    });
+                check_arity(
+                    args_count,
+                    init_method.as_deref().map_or(0, |m| m.closure.proto.arity),
+                )
+                .map_err(|e| execute_state.err(e))?;
+
+                stack[args_start - 1] = Value::Object(obj);
+                if let Some(m) = init_method {
+                    execute_state.call_on_closure(
+                        args_count,
+                        &m.closure,
+                        call_frames,
+                        args_start - 1,
+                    )?;
+                }
+            }
+            Value::NativeFun(callee) => {
+                let args = stack.drain(args_start..).collect();
+                stack.pop().unwrap();
+                stack.push((callee.fun)(args)?);
+            }
+            _ => {
+                return Err(execute_state.err("Can only call functions and classes.".to_string()));
+            }
+        };
+        Ok(())
+    }
+
     fn try_pop2num(stack: &mut Vec<Value>) -> Result<(f64, f64), &'static str> {
         let len = stack.len();
         let bi = len - 1;
@@ -792,24 +877,6 @@ fn make_closure(
         proto: fun.clone(),
         upvalues,
     }
-}
-
-fn call_on_value(
-    args_count: u8,
-    closure: &Gc<Closure>,
-    execute_state: &mut ExecuteState,
-    call_frames: &mut Vec<CallFrame>,
-    stack_base: usize,
-) -> Result<(), InterpreteError> {
-    check_arity(args_count, closure.proto.arity).map_err(|e| execute_state.err(e))?;
-    let (return_codes, return_ip) = execute_state.set_fun_codes(closure.proto.codes.clone(), 0);
-    call_frames.push(CallFrame {
-        stack_base,
-        closure: closure.clone(),
-        return_ip,
-        return_codes,
-    });
-    Ok(())
 }
 
 fn check_arity(args_count: u8, arity: u8) -> Result<(), String> {

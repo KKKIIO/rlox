@@ -470,7 +470,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
         Ok(())
     }
 
-    fn compile_expression(&'_ mut self, expr: &'_ Expression<'s>) -> Result<(), GrammarError<'s>> {
+    fn compile_expression(&mut self, expr: &Expression<'s>) -> Result<(), GrammarError<'s>> {
         match &expr {
             Expression::Literal(l) => {
                 let line = l.line;
@@ -608,7 +608,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     }
                 }
                 crate::ast::expression::LValue::Get(g) => {
-                    self.compile_expression(&g.expr)?;
+                    self.compile_expression(&g.src)?;
                     self.compile_expression(&a.expr)?;
                     self.chunk.add_code(
                         OpCode::SetProp(self.str_pool.register(g.name.lexeme)),
@@ -616,16 +616,61 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                     );
                 }
             },
-            Expression::Call(c) => {
-                self.compile_expression(&c.callee)?;
-                for ele in c.args.iter() {
-                    self.compile_expression(ele)?;
+            Expression::Call(c) => match c.callee.deref() {
+                Expression::Get(g) => {
+                    self.compile_expression(&g.src)?;
+                    for ele in c.args.iter() {
+                        self.compile_expression(ele)?;
+                    }
+                    self.chunk.add_code(
+                        OpCode::Invoke(
+                            self.str_pool.register(g.name.lexeme),
+                            c.args.len().try_into().unwrap(),
+                        ),
+                        c.left_paren.line,
+                    );
                 }
-                self.chunk.add_code(
-                    OpCode::Call(c.args.len().try_into().unwrap()),
-                    c.left_paren_line,
-                );
-            }
+                Expression::Super(s) => {
+                    if !self
+                        .load_scope_var("this", s.super_.line)
+                        .at_token(s.super_)?
+                    {
+                        return Err(GrammarError::at_token(
+                            "Can't use 'super' outside of a class.",
+                            s.super_,
+                        ));
+                    }
+                    for ele in c.args.iter() {
+                        self.compile_expression(ele)?;
+                    }
+                    if !self
+                        .load_scope_var("super", s.super_.line)
+                        .map_err(|e| GrammarError::at_token(e, s.super_))?
+                    {
+                        return Err(GrammarError::at_token(
+                            "Can't use 'super' in a class with no superclass.",
+                            s.super_,
+                        ));
+                    }
+                    self.chunk.add_code(
+                        OpCode::InvokeSuper(
+                            self.str_pool.register(s.method.lexeme),
+                            c.args.len().try_into().unwrap(),
+                        ),
+                        c.left_paren.line,
+                    );
+                }
+                callee => {
+                    self.compile_expression(callee)?;
+                    for ele in c.args.iter() {
+                        self.compile_expression(ele)?;
+                    }
+                    self.chunk.add_code(
+                        OpCode::Call(c.args.len().try_into().unwrap()),
+                        c.left_paren.line,
+                    );
+                }
+            },
             Expression::Super(s) => {
                 if !self
                     .load_scope_var("this", s.super_.line)
@@ -651,7 +696,7 @@ impl<'s, 'o> StmtsCompiler<'s, 'o> {
                 );
             }
             Expression::Get(g) => {
-                self.compile_expression(&g.expr)?;
+                self.compile_expression(&g.src)?;
                 self.chunk.add_code(
                     OpCode::GetProp(self.str_pool.register(g.name.lexeme)),
                     g.dot.line,

@@ -447,6 +447,7 @@ impl<'a> Parser<'a> {
     }
 
     fn finish_call(&mut self, callee: Expression<'a>) -> Result<Expression<'a>, GrammarError<'a>> {
+        let left_paren = self.previous();
         let mut args = vec![];
         if !self.check(TokenType::RightParen) {
             loop {
@@ -464,11 +465,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let paren = self.consume(TokenType::RightParen, "Expect ')' after arguments.")?;
+        self.consume(TokenType::RightParen, "Expect ')' after arguments.")?;
 
         Ok(Expression::Call(Call {
             callee: callee.into(),
-            left_paren_line: paren.line,
+            left_paren,
             args,
         }))
     }
@@ -484,7 +485,7 @@ impl<'a> Parser<'a> {
                 let name =
                     self.consume(TokenType::Identifier, "Expect property name after '.'.")?;
                 expr = Expression::Get(Get {
-                    expr: expr.into(),
+                    src: expr.into(),
                     dot,
                     name,
                 });

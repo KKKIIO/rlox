@@ -72,7 +72,7 @@ pub struct This<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct Get<'a> {
-    pub expr: Box<Expression<'a>>,
+    pub src: Box<Expression<'a>>,
     pub dot: Token<'a>,
     pub name: Token<'a>,
 }
@@ -80,6 +80,6 @@ pub struct Get<'a> {
 #[derive(Debug, PartialEq)]
 pub struct Call<'a> {
     pub callee: Box<Expression<'a>>,
-    pub left_paren_line: u32,
+    pub left_paren: Token<'a>,
     pub args: Vec<Expression<'a>>,
 }
